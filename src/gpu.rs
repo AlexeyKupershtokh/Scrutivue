@@ -1,7 +1,7 @@
 use crate::{
     decode::Frame,
-    model::{PhotoId, Settings},
-    processing::gaussian_weights,
+    model::{Mode, PhotoId, Settings},
+    processing::{diff_key, gaussian_weights, mip_lod, DiffKey},
 };
 use anyhow::{bail, Context, Result};
 use wgpu::util::DeviceExt;
@@ -11,11 +11,56 @@ struct Resident {
     original: wgpu::Buffer,
     filtered: Option<([u32; 2], wgpu::Buffer)>,
 }
+struct DiffLevel {
+    size: [u32; 2],
+    buffer: wgpu::Buffer,
+}
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::{model::Mode, processing::Cpu};
+    #[test]
+    #[ignore = "requires a working native GPU backend"]
+    fn gpu_matches_cpu_mips_and_soft_pixel_edges() {
+        let mut gpu = Gpu::new().unwrap();
+        let mut cpu = Cpu::new();
+        let make = |w, h, seed: u32| Frame {
+            width: w,
+            height: h,
+            rgb: (0..w * h * 3)
+                .map(|i| i.wrapping_mul(747796405).wrapping_add(seed) as u16)
+                .collect(),
+        };
+        let a = make(65, 49, 7);
+        let b = make(47, 37, 555);
+        let mut s = Settings {
+            viewport: [17, 13],
+            gain: 64,
+            ..Settings::default()
+        };
+        for scale in [0.14, 0.25, 0.32, 1.04, 2.01, 4., 8.] {
+            for hp in [false, true] {
+                for mode in [Mode::Click, Mode::Diff] {
+                    s.camera.zoom = crate::model::Zoom::Fixed(scale);
+                    s.highpass = hp;
+                    s.mode = mode;
+                    let expected = cpu.render((1, &a), (2, &b), &s, false);
+                    let actual = gpu.render((1, &a), (2, &b), &s, false).unwrap();
+                    let delta = expected
+                        .iter()
+                        .zip(actual)
+                        .map(|(a, b)| a.abs_diff(b))
+                        .max()
+                        .unwrap();
+                    assert!(
+                        delta <= 1,
+                        "scale {scale}, hp {hp}, {mode:?}, delta {delta}"
+                    );
+                }
+            }
+        }
+    }
     #[test]
     #[ignore = "requires a working native GPU backend"]
     fn gpu_matches_cpu_all_modes_filters_and_dimensions() {
@@ -40,7 +85,6 @@ mod tests {
                     for show_b in [false, true] {
                         s.highpass = highpass;
                         s.mode = mode;
-                        s.single_b = show_b;
                         let expected = cpu.render((1, &a), (2, &b), &s, show_b);
                         let actual = gpu.render((1, &a), (2, &b), &s, show_b).unwrap();
                         let delta = expected
@@ -66,11 +110,16 @@ struct ViewParams {
     view: [u32; 4],
     camera: [f32; 4],
     options: [f32; 4],
+    sampling: [u32; 4],
 }
 pub struct Gpu {
     device: wgpu::Device,
     queue: wgpu::Queue,
     render: wgpu::ComputePipeline,
+    build_difference: wgpu::ComputePipeline,
+    reduce: wgpu::ComputePipeline,
+    reduce_layout: wgpu::BindGroupLayout,
+    difference: Option<(DiffKey, Vec<DiffLevel>)>,
     horizontal: wgpu::ComputePipeline,
     vertical: wgpu::ComputePipeline,
     render_layout: wgpu::BindGroupLayout,
@@ -86,6 +135,7 @@ impl Gpu {
         self.residents.clear();
         self.output = None;
         self.scratch = None;
+        self.difference = None;
     }
     pub fn new() -> Result<Self> {
         smol::block_on(Self::init())
@@ -119,7 +169,7 @@ impl Gpu {
         limits.max_buffer_size = available.max_buffer_size.min(2 * 1024 * 1024 * 1024);
         let (device, queue) = adapter
             .request_device(&wgpu::DeviceDescriptor {
-                label: Some("Lumen compute"),
+                label: Some("Scrutivue compute"),
                 required_features: wgpu::Features::empty(),
                 required_limits: limits,
                 ..Default::default()
@@ -137,6 +187,19 @@ impl Gpu {
             &render_layout,
             include_str!("render.wgsl"),
             "render",
+        );
+        let build_difference = Self::pipeline(
+            &device,
+            &render_layout,
+            include_str!("render.wgsl"),
+            "build_difference",
+        );
+        let reduce_layout = Self::layout(&device, "difference mip layout", &[true, false]);
+        let reduce = Self::pipeline(
+            &device,
+            &reduce_layout,
+            include_str!("mipmap.wgsl"),
+            "reduce",
         );
         let horizontal = Self::pipeline(
             &device,
@@ -162,6 +225,10 @@ impl Gpu {
             device,
             queue,
             render,
+            build_difference,
+            reduce,
+            reduce_layout,
+            difference: None,
             horizontal,
             vertical,
             render_layout,
@@ -363,7 +430,7 @@ impl Gpu {
         let validation = smol::block_on(self.device.pop_error_scope());
         let memory = smol::block_on(self.device.pop_error_scope());
         if let Some(error) = validation.or(memory) {
-            self.residents.clear();
+            self.clear();
             bail!("GPU: {error}");
         }
         result
@@ -375,6 +442,10 @@ impl Gpu {
         settings: &Settings,
         show_b: bool,
     ) -> Result<Vec<u8>> {
+        let key = diff_key(a.0, b.0, settings);
+        if self.difference.as_ref().is_some_and(|(old, _)| *old != key) {
+            self.difference = None;
+        }
         self.residents.retain(|r| r.id == a.0 || r.id == b.0);
         let ai = self.upload(a.0, a.1)?;
         let bi = self.upload(b.0, b.1)?;
@@ -395,6 +466,9 @@ impl Gpu {
                 &mut encoder,
             )?;
         }
+        if settings.mode == Mode::Diff && self.difference.is_none() {
+            self.prepare_difference(key, ai, bi, a.1, b.1, settings, &mut encoder)?;
+        }
         let [vw, vh] = settings.viewport;
         let bytes = vw as u64 * vh as u64 * 4;
         if self.output.as_ref().map(|x| x.0) != Some(bytes) {
@@ -413,7 +487,10 @@ impl Gpu {
         }
         let a_gpu = &self.residents[ai];
         let b_gpu = &self.residents[bi];
-        let params = ViewParams {
+        let scale = settings.camera.scale(a.1.size(), settings.viewport);
+        let levels = self.difference.as_ref().map(|(_, levels)| levels);
+        let lod = levels.map(|levels| mip_lod(scale, levels.len()));
+        let mut params = ViewParams {
             dims: [a.1.width, a.1.height, b.1.width, b.1.height],
             view: [
                 vw,
@@ -428,7 +505,20 @@ impl Gpu {
                 settings.split,
             ],
             options: [settings.gain as f32, show_b as u32 as f32, 0., 0.],
+            sampling: [0; 4],
         };
+        if settings.mode == Mode::Diff {
+            let levels = levels.unwrap();
+            let (low, high, t) = lod.unwrap();
+            params.options[2] = t;
+            params.options[3] = (1u32 << low) as f32;
+            params.sampling = [
+                levels[low].size[0],
+                levels[low].size[1],
+                levels[high].size[0],
+                levels[high].size[1],
+            ];
+        }
         let params = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
@@ -442,8 +532,16 @@ impl Gpu {
             &[
                 &a_gpu.original,
                 &b_gpu.original,
-                a_gpu.filtered.as_ref().map(|x| &x.1).unwrap_or(&self.dummy),
-                b_gpu.filtered.as_ref().map(|x| &x.1).unwrap_or(&self.dummy),
+                if settings.mode == Mode::Diff {
+                    &levels.unwrap()[lod.unwrap().0].buffer
+                } else {
+                    a_gpu.filtered.as_ref().map(|x| &x.1).unwrap_or(&self.dummy)
+                },
+                if settings.mode == Mode::Diff {
+                    &levels.unwrap()[lod.unwrap().1].buffer
+                } else {
+                    b_gpu.filtered.as_ref().map(|x| &x.1).unwrap_or(&self.dummy)
+                },
                 output,
                 &params,
             ],
@@ -473,5 +571,91 @@ impl Gpu {
         let pixels = staging.slice(..).get_mapped_range().to_vec();
         staging.unmap();
         Ok(pixels)
+    }
+    fn prepare_difference(
+        &mut self,
+        key: DiffKey,
+        ai: usize,
+        bi: usize,
+        a: &Frame,
+        b: &Frame,
+        settings: &Settings,
+        encoder: &mut wgpu::CommandEncoder,
+    ) -> Result<()> {
+        let base = self.buffer(
+            a.rgb.len() as u64 * 4,
+            "absolute difference RGB32F",
+            wgpu::BufferUsages::STORAGE,
+        )?;
+        let params = ViewParams {
+            dims: [a.width, a.height, b.width, b.height],
+            view: [a.width, a.height, 0, settings.highpass as u32],
+            camera: [0.; 4],
+            options: [0.; 4],
+            sampling: [0; 4],
+        };
+        let params = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("difference parameters"),
+                contents: bytemuck::bytes_of(&params),
+                usage: wgpu::BufferUsages::UNIFORM,
+            });
+        let ga = &self.residents[ai];
+        let gb = &self.residents[bi];
+        let group = self.group(
+            &self.render_layout,
+            &[
+                &ga.original,
+                &gb.original,
+                ga.filtered.as_ref().map(|x| &x.1).unwrap_or(&self.dummy),
+                gb.filtered.as_ref().map(|x| &x.1).unwrap_or(&self.dummy),
+                &base,
+                &params,
+            ],
+        );
+        {
+            let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                label: Some("absolute difference before resampling"),
+                timestamp_writes: None,
+            });
+            pass.set_pipeline(&self.build_difference);
+            pass.set_bind_group(0, &group, &[]);
+            pass.dispatch_workgroups(a.width.div_ceil(16), a.height.div_ceil(16), 1);
+        }
+        let mut levels = vec![DiffLevel {
+            size: a.size(),
+            buffer: base,
+        }];
+        while levels.last().unwrap().size != [1, 1] {
+            let source = levels.last().unwrap();
+            let [w, h] = source.size;
+            let size = [w.div_ceil(2), h.div_ceil(2)];
+            let dest = self.buffer(
+                size[0] as u64 * size[1] as u64 * 12,
+                "difference mip",
+                wgpu::BufferUsages::STORAGE,
+            )?;
+            let params = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: None,
+                    contents: bytemuck::cast_slice(&[w, h, size[0], size[1]]),
+                    usage: wgpu::BufferUsages::UNIFORM,
+                });
+            let group = self.group(&self.reduce_layout, &[&source.buffer, &dest, &params]);
+            {
+                let mut pass = encoder.begin_compute_pass(&wgpu::ComputePassDescriptor {
+                    label: Some("difference area-average mip"),
+                    timestamp_writes: None,
+                });
+                pass.set_pipeline(&self.reduce);
+                pass.set_bind_group(0, &group, &[]);
+                pass.dispatch_workgroups(size[0].div_ceil(16), size[1].div_ceil(16), 1);
+            }
+            levels.push(DiffLevel { size, buffer: dest });
+        }
+        self.difference = Some((key, levels));
+        Ok(())
     }
 }

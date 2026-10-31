@@ -1,0 +1,38 @@
+Verbatim source license headers from the published Zune crates
+=============================================================
+
+Only notice comments are reproduced here, not implementation code. The exact
+source revisions, paths, line ranges and file hashes are in index.json.
+The copyright statements are preserved exactly as published, including the
+absence of a named holder in these source headers. The root LICENSE.md also
+retains the upstream "zune-image developers" copyright statement.
+
+zune-core@0.4.12: src/bit_depth.rs, lines 1-7
+zune-jpeg@0.4.21: src/bitstream.rs, lines 1-7 (identical header)
+-------------------------------------------------------------
+/*
+ * Copyright (c) 2023.
+ *
+ * This software is free software;
+ *
+ * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
+ */
+
+zune-core@0.4.12: src/lib.rs, lines 1-5
+zune-inflate@0.2.54: src/encoder.rs, lines 1-5 (identical header)
+--------------------------------------------------------------
+/*
+ * Copyright (c) 2023.
+ *
+ * This software is free software; You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
+ */
+
+zune-jpeg@0.4.21: src/color_convert/neon64.rs, lines 1-7
+------------------------------------------------------
+/*
+ * Copyright (c) 2025.
+ *
+ * This software is free software;
+ *
+ * You can redistribute it or modify it under terms of the MIT, Apache License or Zlib license
+ */

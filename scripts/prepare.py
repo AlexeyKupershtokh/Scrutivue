@@ -5,8 +5,10 @@ from pathlib import Path
 import shutil
 import tarfile
 import urllib.request
+import runpy
 
 ROOT = Path(__file__).resolve().parents[1]
+runpy.run_path(str(ROOT / "scripts/prepare_ort.py"))
 pin = json.loads((ROOT / "config/libraw.json").read_text())
 destination = ROOT / "vendor" / "libraw"
 stamp = destination / ".diff-pin"

@@ -7,6 +7,7 @@ use crate::{
 use anyhow::{Context, Result};
 use rayon::prelude::*;
 use serde_json::json;
+use sha2::{Digest, Sha256};
 use std::{path::PathBuf, sync::Arc, time::Instant};
 
 pub fn probe(paths: &[PathBuf]) -> Result<()> {
@@ -18,9 +19,18 @@ pub fn probe(paths: &[PathBuf]) -> Result<()> {
         let thumbnail_ms = start.elapsed().as_secs_f64() * 1000.;
         let start = Instant::now();
         let frame = decode::decode(path)?;
+        let decode_ms = start.elapsed().as_secs_f64() * 1000.;
+        let mut hash = Sha256::new();
+        #[cfg(target_endian = "little")]
+        hash.update(bytemuck::cast_slice(&frame.rgb));
+        #[cfg(target_endian = "big")]
+        for v in &frame.rgb {
+            hash.update(v.to_le_bytes());
+        }
         results.push(json!({ "path": path, "dimensions": frame.size(), "rgb16_bytes": frame.bytes(),
             "thumbnail_dimensions": [thumbnail.width(), thumbnail.height()], "thumbnail_ms": thumbnail_ms,
-            "decode_ms": start.elapsed().as_secs_f64() * 1000., "sample_sum": frame.rgb.iter().map(|v| *v as u64).sum::<u64>() }));
+            "decode_ms": decode_ms, "rgb16_le_sha256":format!("{:x}",hash.finalize()),
+            "sample_sum": frame.rgb.iter().map(|v| *v as u64).sum::<u64>() }));
     }
     println!("{}", serde_json::to_string_pretty(&results)?);
     Ok(())

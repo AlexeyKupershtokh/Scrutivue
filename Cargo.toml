@@ -1,9 +1,10 @@
 [package]
-name = "lumen-diff"
+name = "scrutivue"
 version = "0.1.0"
 edition = "2021"
-description = "A GPU-assisted image and RAW comparison desk"
+description = "Scrutivue — a GPU-assisted photograph and RAW comparison viewer"
 license = "MIT"
+repository = "https://github.com/AlexeyKupershtokh/Scrutivue"
 build = "build.rs"
 
 [dependencies]
@@ -25,6 +26,10 @@ libz-sys = { version = "1.1", features = ["static"] }
 smol = "2"
 memmap2 = "0.9"
 raw-window-handle = "0.6"
+ssimulacra2 = "=0.5.1"
+jxl-oxide = "=0.12.5"
+ort = { version = "=2.0.0-rc.12", default-features = false, features = ["std", "load-dynamic", "api-24"] }
+sha2 = "0.10"
 
 [build-dependencies]
 embed-resource = "3"

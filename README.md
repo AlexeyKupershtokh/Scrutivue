@@ -1,20 +1,35 @@
-# Lumen Diff
+# Scrutivue
 
-Настольное приложение для сравнения фотографий и RAW. **Rust · GPUI / GPUI Kit · DX12 через wgpu.** Nikon HE/HE* читаются форком LibRaw из Redlamp.
+[![Windows build](https://github.com/AlexeyKupershtokh/Scrutivue/actions/workflows/windows.yml/badge.svg)](https://github.com/AlexeyKupershtokh/Scrutivue/actions/workflows/windows.yml)
 
-![Интерфейс Lumen Diff](docs/images/ui.png)
+A desktop application for comparing photographs and RAW images. **Rust · GPUI / GPUI Kit · DX12 through wgpu.** Nikon HE/HE* decoding uses Redlamp's LibRaw fork.
 
-- Добавление файлов и папок, включая подпапки; виртуальный список с фоновыми миниатюрами и изменением порядка.
-- Первый выбранный щелчком файл — **A**, второй — **B**. Повторный щелчок снимает выбор; следующий новый файл заменяет B.
-- **Single**, **Diff** с усилением 1/4/16/64/256×, **Both slider**, **Both click**.
-- Зум у курсора, панорамирование, Fit / 100% / 200% / 400%; положение сохраняется между кадрами.
-- Вычитание Gaussian с выбором радиуса для сравнения шума.
-- Разделитель использует готовые текстуры и только меняет их отсечение — без повторного вычисления изображений.
-- Кнопки добавления, рекурсивного обхода и очистки закреплены над списком; справка открывается отдельно (`F1`).
+<details>
+<summary>Historical UI screenshot (before the Scrutivue rename)</summary>
 
-## Сборка и запуск
+![Earlier interface](docs/images/ui.png)
 
-Нужны актуальный Rust, Python 3.12+ и C++17-компилятор; на Windows — Visual Studio Build Tools с Windows SDK.
+*Screenshot of an earlier Lumen Diff build, before the Scrutivue rename. The current version uses neutral grey floating controls, a navigator and single-file startup. A fresh screenshot has not been captured in the current desktop environment.*
+
+</details>
+
+- Add files and folders, optionally including subfolders. The virtualized library shows dimensions, readable file sizes (for example, 7.1 MB or 500 KB), background thumbnails and reorderable rows. **Refresh** synchronizes added folders.
+- Starts in **Single** with only the first image selected. A normal click selects one image; **Ctrl+click** selects/toggles comparison B. **Slider** and **Diff** are disabled without B; removing B temporarily shows Single and adding it again restores the chosen comparison mode. Context menus offer **Open file**, **Open with**, **Open containing folder**, **Copy file name**, **Copy full path**, and explicit A/B assignment.
+- **Single / Slider / Diff** (`1`/`2`/`3`) with tooltips and 1/4/16/64/256× Diff gain. In Single, holding shows B; left and middle dragging pan.
+- Separate floating controls of consistent height. Collapse the library to the left ☰ button (`L`); `F11` toggles fullscreen.
+- Cursor-anchored zoom from ½ Fit to 800%, with the camera constrained to image edges. Gestures transform a prepared texture; refinement follows 10 ms of inactivity.
+- Bottom-right **Navigator** with the visible region: click to recenter, drag its viewport box to pan, or use its wheel to zoom.
+- **High pass filter** with a radius control at the top. Cached difference filtering reduces moiré when zoomed out.
+- **Color picker** (`C`): an unsmoothed 1600% original-pixel loupe; A/B colors in RGB8/16, HEX, HSL, HSV, OKLCH and Lab/XYZ D65.
+- **Statistics** (`S`): progressive results for PSNR, SSIM, MS-SSIM, SSIMULACRA2, GMSD, LPIPS, MAE/RMSE and three separate A/B noise estimates. In-memory LFU caches hold 100 pairs and 20 intermediate resized copies. Completed live-frame hits do not reread files, hash pixels or recompute stages. Streaming resizes and released ONNX activation buffers reduce temporary/retained memory; [measurements and remaining costs](docs/statistics-performance.md). LPIPS uses ONNX + `ort`, without Python.
+- JPEG XL DNG 1.7 (RGB/grey16) is decompressed before LibRaw development. DNG DefaultCrop and JPEG orientation are respected without stretching. [DNG/JPEG dimensions](docs/dng.md), [pair loading/cache measurements](docs/loading-performance.md); source files are never changed.
+- View settings, panel visibility and window size persist between sessions.
+- The divider only changes clipping of prepared textures, without recomputing images.
+- Add, recursion and clear controls stay above the library; help opens in a separate window (`F1`).
+
+## Build and run
+
+Requires current Rust, Python 3.12+ and a C++17 compiler; on Windows, install Visual Studio Build Tools with the Windows SDK.
 
 ```powershell
 python scripts/prepare.py
@@ -23,8 +38,16 @@ cargo run --release -- --recursive "D:\Photos"
 cargo run --release -- "D:\Photos\A.NEF" "D:\Photos\B.NEF"
 ```
 
-Готовый Windows binary после сборки: `target/release/lumen-diff.exe`. OpenCL не требуется. Иконка встроена в EXE.
+The Windows binary is `target/release/scrutivue.exe`; **keep the matching `onnxruntime.dll` from that directory beside it**. Python is only needed for preparation/validation scripts, not the application. OpenCL is not required. The icon and LPIPS model are embedded in the EXE. The Microsoft Visual C++ x64 runtime may be required on a clean Windows installation.
 
-Подробности, ограничения и команды проверок: [руководство](docs/manual.md), [замеры](docs/validation.md), [выбор DX12](docs/compute-decision.md). Первый decode RAW занимает секунды в фоне; измерения прогретого GPU-пути не означают гарантии input-to-screen ≤100 мс на любом компьютере.
+## Windows builds on GitHub
 
-MIT; LibRaw используется по CDDL-1.0. Уведомления: [LICENSES](LICENSES/README.md). На скриншоте — CC0 Nikon Z9 HE/HE* из raw.pixls.us, без внешнего UI-макета.
+[Windows workflow](https://github.com/AlexeyKupershtokh/Scrutivue/actions/workflows/windows.yml) runs on pushes, pull requests and manual dispatch. It prepares SHA-256-pinned LibRaw/ONNX Runtime, checks formatting, runs native computation/cache tests, builds Windows x64 release, and checks the embedded LPIPS through the CLI without a GUI or Python ML dependencies.
+
+Download **Scrutivue-windows-x64** from a successful run's Artifacts section, then extract the included ZIP completely. It contains the application, matching ONNX Runtime, build pins and dependency notices. These are unsigned builds, not an installer; Windows SmartScreen may warn. Native GPU/UI tests are run separately on a real desktop, not claimed from the headless CI job.
+
+Comparison is fully offline, with no startup downloads. Formulas, analysis sizes and CLI usage: [metrics](docs/metrics.md). Use `--settings-file "X:\profile\settings.json"` for a separate settings profile.
+
+Details, limitations and validation commands: [manual](docs/manual.md), [measurements](docs/validation.md), [DX12 decision](docs/compute-decision.md). Initial RAW decoding takes seconds in the background; warm GPU measurements do not guarantee input-to-screen latency ≤100 ms on every machine.
+
+MIT; LibRaw is used under CDDL-1.0. Notices: [LICENSES](LICENSES/README.md). The screenshot shows CC0 Nikon Z9 HE/HE* images from raw.pixls.us, without an external UI mockup.

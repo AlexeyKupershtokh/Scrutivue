@@ -1,0 +1,8 @@
+{
+  "model": "lpips-squeeze-v0.1.onnx",
+  "sha256": "90b3d3464c3244fd01b9e4d1c37aed8e1a6c0a3c6e9ee3ac90474a5948b1e8e8",
+  "source": "richzhang/PerceptualSimilarity lpips 0.1.4, learned v0.1 + torchvision SqueezeNet1_1_Weights.IMAGENET1K_V1",
+  "export": "torch 2.8.0+cpu, torchvision 0.23.0+cpu, onnx 1.19.1, opset 17",
+  "inputs": "a,b: float32 NCHW [1,3,H,W], nominal sRGB 0..1, H/W >=32",
+  "output": "lpips: float32 [1], lower is more similar"
+}

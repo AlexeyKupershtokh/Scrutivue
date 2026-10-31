@@ -1,0 +1,62 @@
+Verbatim source license headers from the published AccessKit crates
+=================================================================
+
+Only notice comments are reproduced here, not implementation code. The exact
+source revisions, paths, line ranges and file hashes are in index.json.
+These excerpts retain distinct AccessKit, Chromium and kurbo copyright notices.
+
+accesskit@0.24.1: src/geometry.rs, lines 1-10
+------------------------------------------
+// Copyright 2023 The AccessKit Authors. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (found in
+// the LICENSE-APACHE file) or the MIT license (found in
+// the LICENSE-MIT file), at your option.
+
+// Derived from kurbo.
+// Copyright 2018 The kurbo Authors.
+// Licensed under the Apache License, Version 2.0 (found in
+// the LICENSE-APACHE file) or the MIT license (found in
+// the LICENSE-MIT file), at your option.
+
+accesskit@0.24.1: src/lib.rs, lines 1-9
+-------------------------------------
+// Copyright 2021 The AccessKit Authors. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (found in
+// the LICENSE-APACHE file) or the MIT license (found in
+// the LICENSE-MIT file), at your option.
+
+// Derived from Chromium's accessibility abstraction.
+// Copyright 2018 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE.chromium file.
+
+accesskit_consumer@0.38.0: src/node.rs, lines 1-9
+----------------------------------------------
+// Copyright 2021 The AccessKit Authors. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (found in
+// the LICENSE-APACHE file) or the MIT license (found in
+// the LICENSE-MIT file), at your option.
+
+// Derived from Chromium's accessibility abstraction.
+// Copyright 2021 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE.chromium file.
+
+accesskit_windows@0.34.0: src/node.rs, lines 1-9
+---------------------------------------------
+// Copyright 2022 The AccessKit Authors. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (found in
+// the LICENSE-APACHE file) or the MIT license (found in
+// the LICENSE-MIT file), at your option.
+
+// Derived from Chromium's accessibility abstraction.
+// Copyright 2021 The Chromium Authors. All rights reserved.
+// Use of this source code is governed by a BSD-style license that can be
+// found in the LICENSE.chromium file.
+
+accesskit_windows@0.34.0: src/window_handle.rs, lines 1-4
+------------------------------------------------------
+// Copyright 2024 The AccessKit Authors. All rights reserved.
+// Licensed under the Apache License, Version 2.0 (found in
+// the LICENSE-APACHE file) or the MIT license (found in
+// the LICENSE-MIT file), at your option.

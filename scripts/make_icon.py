@@ -1,4 +1,4 @@
-"""Regenerate the original Lumen Diff PNG/ICO assets (requires Pillow)."""
+"""Regenerate the Scrutivue PNG/ICO assets (requires Pillow)."""
 from pathlib import Path
 from PIL import Image, ImageDraw
 
@@ -23,5 +23,5 @@ draw.ellipse((320*scale, 172*scale, 360*scale, 212*scale), fill="#f5f0e9")
 rect((250, 82, 262, 430), 6, "#f4e5dc")
 rect((233, 224, 279, 288), 14, "#f4e5dc")
 image = image.resize((512, 512), Image.Resampling.LANCZOS)
-image.save(root / "lumen-diff.png")
-image.save(root / "lumen-diff.ico", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])
+image.save(root / "scrutivue.png")
+image.save(root / "scrutivue.ico", sizes=[(16,16),(24,24),(32,32),(48,48),(64,64),(128,128),(256,256)])

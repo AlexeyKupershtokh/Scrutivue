@@ -65,7 +65,7 @@ pub fn app_icon() -> std::sync::Arc<gpui_kit::RenderImage> {
     static ICON: std::sync::OnceLock<std::sync::Arc<gpui_kit::RenderImage>> =
         std::sync::OnceLock::new();
     ICON.get_or_init(|| {
-        let mut image = image::load_from_memory(include_bytes!("../assets/lumen-diff.png"))
+        let mut image = image::load_from_memory(include_bytes!("../assets/scrutivue.png"))
             .expect("bundled icon")
             .into_rgba8();
         for pixel in image.pixels_mut() {

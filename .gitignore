@@ -2,5 +2,7 @@
 /vendor/
 /bench-results/
 /lumen-diff.exe
+/scrutivue.exe
+/onnxruntime.dll
 *.log
 **/__pycache__/

@@ -1,16 +1,67 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
-    println!("cargo:rerun-if-changed=assets/lumen-diff.ico");
+    println!("cargo:rerun-if-changed=config/onnxruntime.json");
+    if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
+        let source = PathBuf::from("vendor/onnxruntime");
+        let pin: serde_json::Value =
+            serde_json::from_str(&fs::read_to_string("config/onnxruntime.json").unwrap()).unwrap();
+        assert_eq!(
+            fs::read_to_string(source.join(".diff-pin"))
+                .unwrap_or_default()
+                .trim(),
+            pin["version"].as_str().unwrap(),
+            "Run python scripts/prepare.py to fetch ONNX Runtime"
+        );
+        println!("cargo:rerun-if-changed=vendor/onnxruntime/.diff-pin");
+        let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+        let profile = out.ancestors().nth(3).unwrap();
+        for directory in [profile.to_path_buf(), profile.join("deps")] {
+            fs::create_dir_all(&directory).unwrap();
+            fs::copy(
+                source.join("lib/onnxruntime.dll"),
+                directory.join("onnxruntime.dll"),
+            )
+            .expect("copy ONNX Runtime beside executable");
+        }
+    }
+    println!("cargo:rerun-if-changed=assets/scrutivue.ico");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let icon =
-            PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("assets/lumen-diff.ico");
-        let rc = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("lumen-icon.rc");
+            PathBuf::from(env::var_os("CARGO_MANIFEST_DIR").unwrap()).join("assets/scrutivue.ico");
+        let rc = PathBuf::from(env::var_os("OUT_DIR").unwrap()).join("scrutivue-icon.rc");
         fs::write(
             &rc,
             format!(
-                "1 ICON \"{}\"\n",
-                icon.display().to_string().replace('\\', "\\\\")
+                r#"1 ICON "{icon}"
+1 VERSIONINFO
+ FILEVERSION {major},{minor},{patch},0
+ PRODUCTVERSION {major},{minor},{patch},0
+ FILETYPE 0x1L
+BEGIN
+ BLOCK "StringFileInfo"
+ BEGIN
+  BLOCK "040904B0"
+  BEGIN
+   VALUE "FileDescription", "Scrutivue photograph and RAW comparison\0"
+   VALUE "FileVersion", "{version}\0"
+   VALUE "InternalName", "scrutivue\0"
+   VALUE "OriginalFilename", "scrutivue.exe\0"
+   VALUE "ProductName", "Scrutivue\0"
+   VALUE "ProductVersion", "{version}\0"
+  END
+ END
+ BLOCK "VarFileInfo"
+ BEGIN
+  VALUE "Translation", 0x409, 1200
+ END
+END
+"#,
+                icon = icon.display().to_string().replace('\\', "\\\\"),
+                major = env::var("CARGO_PKG_VERSION_MAJOR").unwrap(),
+                minor = env::var("CARGO_PKG_VERSION_MINOR").unwrap(),
+                patch = env::var("CARGO_PKG_VERSION_PATCH").unwrap(),
+                version = env::var("CARGO_PKG_VERSION").unwrap(),
             ),
         )
         .unwrap();

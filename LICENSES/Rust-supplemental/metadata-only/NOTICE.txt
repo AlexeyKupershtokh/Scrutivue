@@ -1,0 +1,49 @@
+Declared licenses and attribution for packages without upstream notice texts
+==========================================================================
+
+The following declarations are copied verbatim from the published manifests
+and, for mac, its published README. The pinned upstream manifests were also
+checked. Source URLs and hashes are recorded in index.json.
+
+No copyright statement was found in these published packages or their pinned
+upstream trees. Author fields are attribution metadata, not invented copyright
+claims. The accompanying canonical license texts state the declared terms; they
+must not be mistaken for recovered package-specific upstream notices. Any
+copyright placeholders in canonical texts remain unfilled templates.
+
+hexf-parse@0.2.1
+---------------
+authors = ["Kang Seonghoon <public+rust@mearie.org>"]
+license = "CC0-1.0"
+
+Canonical declared terms: ../canonical/CC0-1.0.txt
+
+mac@0.1.1
+---------
+authors = ["Jonathan Reem <jonathan.reem@gmail.com>"]
+license = "MIT/Apache-2.0"
+
+README.md, lines 20-26:
+## Author
+
+[Jonathan Reem](https://medium.com/@jreem) is the primary author and maintainer of mac.
+
+## License
+
+MIT/Apache-2.0, like rust itself
+
+Selected declared terms: ../canonical/Apache-2.0.txt
+
+seahash@4.1.0
+-------------
+authors = ["ticki <ticki@users.noreply.github.com>", "Tom Almeida <tom@tommoa.me>"]
+license = "MIT"
+
+Canonical declared terms: ../canonical/MIT.txt
+
+simd_helpers@0.1.0
+------------------
+authors = ["Luca Barbato <lu_zero@gentoo.org>"]
+license = "MIT"
+
+Canonical declared terms: ../canonical/MIT.txt
