@@ -4,14 +4,13 @@
 
 A desktop application for comparing photographs and RAW images. **Rust · GPUI / GPUI Kit · DX12 through wgpu.** Nikon HE/HE* decoding uses Redlamp's LibRaw fork.
 
-<details>
-<summary>Historical UI screenshot (before the Scrutivue rename)</summary>
+![Scrutivue with synchronized Slider comparison, image library and navigator](docs/images/ui.png)
 
-![Earlier interface](docs/images/ui.png)
+*Synchronized Slider comparison with the image library and navigator.*
 
-*Screenshot of an earlier Lumen Diff build, before the Scrutivue rename. The current version uses neutral grey floating controls, a navigator and single-file startup. A fresh screenshot has not been captured in the current desktop environment.*
+![Scrutivue Diff mode with the color picker, original-pixel loupe and image statistics](docs/images/diff-ui.png)
 
-</details>
+*Diff mode with the 1600% color-picker loupe and image statistics.*
 
 - Add files and folders, optionally including subfolders. The virtualized library shows dimensions, readable file sizes (for example, 7.1 MB or 500 KB), background thumbnails and reorderable rows. **Refresh** synchronizes added folders.
 - Starts in **Single** with only the first image selected. A normal click selects one image; **Ctrl+click** selects/toggles comparison B. **Slider** and **Diff** are disabled without B; removing B temporarily shows Single and adding it again restores the chosen comparison mode. Context menus offer **Open file**, **Open with**, **Open containing folder**, **Copy file name**, **Copy full path**, and explicit A/B assignment.
@@ -42,7 +41,7 @@ The Windows binary is `target/release/scrutivue.exe`; **keep the matching `onnxr
 
 ## Windows builds on GitHub
 
-[Windows workflow](https://github.com/AlexeyKupershtokh/Scrutivue/actions/workflows/windows.yml) runs on pushes, pull requests and manual dispatch. It prepares SHA-256-pinned LibRaw/ONNX Runtime, checks formatting, runs native computation/cache tests, builds Windows x64 release, and checks the embedded LPIPS through the CLI without a GUI or Python ML dependencies.
+[Windows workflow](https://github.com/AlexeyKupershtokh/Scrutivue/actions/workflows/windows.yml) runs only when started manually: open **Actions → Windows → Run workflow**. Pushes and pull requests do not trigger builds. It prepares SHA-256-pinned LibRaw/ONNX Runtime, checks formatting, runs native computation/cache tests, builds Windows x64 release, and checks the embedded LPIPS through the CLI without a GUI or Python ML dependencies.
 
 Download **Scrutivue-windows-x64** from a successful run's Artifacts section, then extract the included ZIP completely. It contains the application, matching ONNX Runtime, build pins and dependency notices. These are unsigned builds, not an installer; Windows SmartScreen may warn. Native GPU/UI tests are run separately on a real desktop, not claimed from the headless CI job.
 
@@ -50,4 +49,4 @@ Comparison is fully offline, with no startup downloads. Formulas, analysis sizes
 
 Details, limitations and validation commands: [manual](docs/manual.md), [measurements](docs/validation.md), [DX12 decision](docs/compute-decision.md). Initial RAW decoding takes seconds in the background; warm GPU measurements do not guarantee input-to-screen latency ≤100 ms on every machine.
 
-MIT; LibRaw is used under CDDL-1.0. Notices: [LICENSES](LICENSES/README.md). The screenshot shows CC0 Nikon Z9 HE/HE* images from raw.pixls.us, without an external UI mockup.
+MIT; LibRaw is used under CDDL-1.0. Notices: [LICENSES](LICENSES/README.md). The Slider overview uses CC0 Nikon Z9 HE/HE* samples from raw.pixls.us. The Diff, color picker and statistics screenshot was provided by the project author. Both show the native application, not an external UI mockup.
