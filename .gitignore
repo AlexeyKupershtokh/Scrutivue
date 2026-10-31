@@ -1,0 +1,6 @@
+/target/
+/vendor/
+/bench-results/
+/lumen-diff.exe
+*.log
+**/__pycache__/
