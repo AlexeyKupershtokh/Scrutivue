@@ -21,6 +21,7 @@ use std::{
     time::{Duration, Instant},
 };
 mod difference;
+mod retention;
 
 #[derive(Clone)]
 pub struct Request {
@@ -60,9 +61,14 @@ pub enum Event {
     },
 }
 pub struct Worker {
-    sender: Sender<(u64, Option<Request>)>,
+    sender: Sender<(u64, Command)>,
     revision: Arc<AtomicU64>,
     pub events: Receiver<Event>,
+}
+enum Command {
+    Load(Request),
+    Pause,
+    Clear,
 }
 impl Worker {
     pub fn new() -> Self {
@@ -82,11 +88,15 @@ impl Worker {
     }
     pub fn request(&self, request: Request) {
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
-        let _ = self.sender.send((revision, Some(request)));
+        let _ = self.sender.send((revision, Command::Load(request)));
+    }
+    pub fn pause(&self) {
+        let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
+        let _ = self.sender.send((revision, Command::Pause));
     }
     pub fn clear(&self) {
         let revision = self.revision.fetch_add(1, Ordering::AcqRel) + 1;
-        let _ = self.sender.send((revision, None));
+        let _ = self.sender.send((revision, Command::Clear));
     }
 }
 impl Drop for Worker {
@@ -100,6 +110,14 @@ struct State {
     pending: Option<(usize, jxl::Session)>,
 }
 impl State {
+    fn tile_bytes(&self) -> usize {
+        self.source
+            .tiles
+            .iter()
+            .flatten()
+            .map(|tile| tile.raw.capacity() * std::mem::size_of::<u16>() + tile.display.bytes())
+            .sum()
+    }
     fn sample_exact(&self, x: u32, y: u32) -> Option<[u16; 3]> {
         if self.full.is_none() {
             let index = self.source.index_at(self.source.raw_point(x, y));
@@ -142,6 +160,7 @@ impl State {
         coarse: bool,
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> anyhow::Result<()> {
+        anyhow::ensure!(!cancelled(), "Image decode cancelled");
         if self.pending.as_ref().is_some_and(|(i, _)| *i == index) {
             let (_, session) = self.pending.as_mut().unwrap();
             session.advance(1, &|| cancelled())?;
@@ -317,23 +336,30 @@ fn pixels(state: &State, reference: [u32; 2], settings: &Settings) -> Vec<u8> {
                 + (y as f32 + 0.5 - h as f32 / 2.) / scale;
             let p = ((y * w + x) * 4) as usize;
             pixels[p + 3] = 255;
-            let value =
-                if sx >= 0. && sy >= 0. && sx < reference[0] as f32 && sy < reference[1] as f32 {
-                    state.sample(
-                        ((sx / reference[0] as f32 * state.source.size[0] as f32) as u32)
-                            .min(state.source.size[0] - 1),
-                        ((sy / reference[1] as f32 * state.source.size[1] as f32) as u32)
-                            .min(state.source.size[1] - 1),
-                    )
-                } else {
-                    None
-                };
+            let inside =
+                sx >= 0. && sy >= 0. && sx < reference[0] as f32 && sy < reference[1] as f32;
+            let value = if inside {
+                state.sample(
+                    ((sx / reference[0] as f32 * state.source.size[0] as f32) as u32)
+                        .min(state.source.size[0] - 1),
+                    ((sy / reference[1] as f32 * state.source.size[1] as f32) as u32)
+                        .min(state.source.size[1] - 1),
+                )
+            } else {
+                None
+            };
             if let Some(rgb) = value {
                 pixels[p] = (rgb[2] as u32 * 255 / 65535) as u8;
                 pixels[p + 1] = (rgb[1] as u32 * 255 / 65535) as u8;
                 pixels[p + 2] = (rgb[0] as u32 * 255 / 65535) as u8;
             } else {
-                pixels[p..p + 3].fill(30);
+                pixels[p..p + 3].fill(if inside {
+                    30
+                } else if (x / 16 + y / 16) & 1 == 1 {
+                    19
+                } else {
+                    22
+                });
             }
         }
     }
@@ -365,7 +391,7 @@ fn publish(
         Some(render_image(w, h, pixels(b, a.source.size, &job.settings)))
     };
     let (progress, status) = progress_status(job, states, difference_pixels);
-    let _ = tx.try_send(Event::Snapshot {
+    let published = tx.try_send(Event::Snapshot {
         generation: job.generation,
         pair: ids,
         settings: job.settings.clone(),
@@ -375,6 +401,14 @@ fn publish(
         status,
         progress,
     });
+    // Qualification must not postpone the first visible tile. Warm its lazy
+    // header check only AFTER publishing, not while opening either source.
+    if published.is_ok() {
+        a.source.prepare_completion_policy();
+        if ids[0] != ids[1] {
+            b.source.prepare_completion_policy();
+        }
+    }
 }
 fn progress_status(
     job: &Request,
@@ -401,7 +435,7 @@ fn progress_status(
         difference_pixels,
     };
     let status = format!(
-        "DNG tiles A {}/{} · B {}/{} · {}preview; exact tools wait for full development",
+        "DNG tiles A {}/{} · B {}/{} · {}preview; {}",
         done[0],
         total[0],
         done[1],
@@ -410,6 +444,11 @@ fn progress_status(
             "paired-tile difference · "
         } else {
             ""
+        },
+        if done == total {
+            "preparing full-resolution tools"
+        } else {
+            "exact tools wait for full development"
         }
     );
     (progress, status)
@@ -429,20 +468,27 @@ fn batch(
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> anyhow::Result<()> {
     let source = &state.source;
-    let decoded: anyhow::Result<Vec<_>> = pool.install(|| {
+    let decoded: Vec<_> = pool.install(|| {
         indices
             .par_iter()
-            .map(|&i| {
-                source
-                    .decode_display(i, library, cancelled)
-                    .map(|tile| (i, tile))
-            })
+            .map(|&i| (i, source.decode_display(i, library, cancelled)))
             .collect()
     });
-    for (i, tile) in decoded? {
-        state.source.tiles[i] = Some(tile);
+    commit_batch(state, decoded)
+}
+fn commit_batch(
+    state: &mut State,
+    decoded: Vec<(usize, anyhow::Result<Tile>)>,
+) -> anyhow::Result<()> {
+    let mut error = None;
+    for (i, result) in decoded {
+        match result {
+            Ok(tile) => state.source.tiles[i] = Some(tile),
+            Err(failure) if error.is_none() => error = Some(failure),
+            Err(_) => {}
+        }
     }
-    Ok(())
+    error.map_or(Ok(()), Err)
 }
 #[derive(Debug)]
 enum Work {
@@ -522,7 +568,8 @@ fn next_round(
             let coarse = native
                 && job.settings.mode != Mode::Diff
                 && job.settings.camera.scale(reference, job.settings.viewport) < 0.5
-                && state.source.progressive_hint;
+                && state.source.progressive_hint
+                && state.source.tiles[indices[0]].is_none();
             let work = if let Some((index, _)) = &state.pending {
                 if indices.contains(index) {
                     Work::Step {
@@ -593,7 +640,7 @@ fn finish_round(
         .filter(|id| states[id].full.is_none())
         .collect();
     needed.dedup();
-    let finish = |state: &mut State| state.source.finish(cancelled);
+    let finish = |state: &mut State| pool.install(|| state.source.finish(cancelled));
     let frames = match needed.as_slice() {
         [a, b] => {
             let [sa, sb] = states.get_disjoint_mut([a, b]);
@@ -610,7 +657,7 @@ fn finish_round(
     }
     Ok(frames)
 }
-fn run(jobs: Receiver<(u64, Option<Request>)>, tx: Sender<Event>, revision: Arc<AtomicU64>) {
+fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU64>) {
     let library = jxl::Library::installed().ok();
     let threads = thread::available_parallelism()
         .map(usize::from)
@@ -623,27 +670,43 @@ fn run(jobs: Receiver<(u64, Option<Request>)>, tx: Sender<Event>, revision: Arc<
         .build()
         .expect("DNG tile pool");
     let mut states = HashMap::<PhotoId, State>::new();
+    let mut retention = retention::Retention::default();
     let mut difference = difference::Preview::default();
     let mut queued = None;
     'requests: loop {
-        let command = match queued.take().or_else(|| jobs.recv().ok()) {
+        let (token, job) = match queued.take().or_else(|| jobs.recv().ok()) {
             Some(command) => command,
             None => return,
         };
-        let (token, job) = jobs.try_iter().last().unwrap_or(command);
-        let Some(job) = job else {
-            states.clear();
-            difference.clear();
+        // Skip superseded loads, but never consume/discard a Clear barrier.
+        if matches!(&job, Command::Load(_)) && revision.load(Ordering::Acquire) != token {
             continue;
+        }
+        let job = match job {
+            Command::Load(job) => job,
+            Command::Pause => {
+                retention.trim(&mut states, &[]);
+                difference.clear();
+                continue;
+            }
+            Command::Clear => {
+                states.clear();
+                retention.clear();
+                difference.clear();
+                continue;
+            }
         };
         let selected: Vec<_> = job.pair.iter().map(|p| p.0).collect();
-        states.retain(|id, state| {
-            let keep = selected.contains(id) && state.source.unchanged();
-            if !keep {
+        for (id, path) in &job.pair {
+            if states
+                .get(id)
+                .is_some_and(|state| !state.source.matches(path))
+            {
+                states.remove(id);
                 difference.clear();
             }
-            keep
-        });
+        }
+        retention.trim(&mut states, &selected);
         for (side, (id, path)) in job.pair.iter().enumerate() {
             if !states.contains_key(id) {
                 match Source::open(path) {
@@ -675,13 +738,24 @@ fn run(jobs: Receiver<(u64, Option<Request>)>, tx: Sender<Event>, revision: Arc<
                 }
             }
         }
+        retention.touch(&selected);
         let start = Instant::now();
         let mut published = Instant::now() - Duration::from_secs(1);
         let mut view_dirty = true;
         let cancelled = || revision.load(Ordering::Acquire) != token;
+        // A resumed viewport must show cached tiles before starting another
+        // decode batch, rather than hiding the cache behind newly missing work.
+        if !cancelled()
+            && selected.iter().any(|id| {
+                states[id].full.is_some() || states[id].source.tiles.iter().any(Option::is_some)
+            })
+        {
+            publish(&tx, &job, &states, &mut difference);
+            view_dirty = false;
+            published = Instant::now();
+        }
         loop {
             if cancelled() {
-                queued = jobs.try_iter().last();
                 continue 'requests;
             }
             let idle = start.elapsed() >= Duration::from_millis(250);
@@ -691,14 +765,14 @@ fn run(jobs: Receiver<(u64, Option<Request>)>, tx: Sender<Event>, revision: Arc<
                     execute_round(&mut states, &plans, &pool, library.as_ref(), &cancelled);
                 if let Err(error) = result {
                     if cancelled() {
-                        queued = jobs.try_iter().last();
                         continue 'requests;
                     }
                     let _ = tx.send(Event::Unsupported {
                         ids: selected.clone(),
                         reason: format!("Full DNG fallback: {error:#}"),
                     });
-                    states.clear();
+                    states.retain(|id, _| !selected.contains(id));
+                    difference.clear();
                     continue 'requests;
                 }
                 view_dirty |= plans.iter().any(|p| p.visible);
@@ -735,14 +809,14 @@ fn run(jobs: Receiver<(u64, Option<Request>)>, tx: Sender<Event>, revision: Arc<
                     }
                     Err(error) => {
                         if cancelled() {
-                            queued = jobs.try_iter().last();
                             continue 'requests;
                         }
                         let _ = tx.send(Event::Unsupported {
                             ids: selected.clone(),
                             reason: format!("Full DNG fallback: {error:#}"),
                         });
-                        states.clear();
+                        states.retain(|id, _| !selected.contains(id));
+                        difference.clear();
                     }
                 }
                 // Exact frames now go through the normal GPU/filter/statistics path.
@@ -800,6 +874,7 @@ pub fn probe(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
             decoded += indices.len();
         }
         views.push(serde_json::json!({"center":center,"visible_tiles":visible.len(),"new_tile_decodes":decoded-before,"ready_ms":timer.elapsed().as_secs_f64()*1000.}));
+        state.source.prepare_completion_policy();
     }
     let initial_ms = start.elapsed().as_secs_f64() * 1000.;
     let mut stages = Vec::new();
@@ -825,9 +900,20 @@ pub fn probe(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
         decoded += indices.len();
     }
     let ready_tiles_ms = start.elapsed().as_secs_f64() * 1000.;
-    let frame = state.source.finish(&|| false)?;
+    let (frame, completion) = pool.install(|| state.source.finish_profiled(&|| false))?;
     let full_ready_ms = start.elapsed().as_secs_f64() * 1000.;
     let baseline = crate::decode::decode(path)?;
+    let legacy = pool.install(|| state.source.finish_reference(&|| false))?;
+    let legacy_differences = frame
+        .rgb
+        .iter()
+        .zip(&legacy.rgb)
+        .filter(|(a, b)| a != b)
+        .count();
+    anyhow::ensure!(
+        frame.size() == legacy.size() && legacy_differences == 0,
+        "Tile completion differs from independent legacy full LibRaw: {legacy_differences} samples"
+    );
     let differing = frame
         .rgb
         .iter()
@@ -871,8 +957,98 @@ pub fn probe(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
         serde_json::json!({"success":true,"source":path,"native_runtime":library.is_some(),"size":size,"total_tiles":count,
         "views":views,"three_views_ms":initial_ms,"optional_progressive_stage":stages,
         "total_entropy_tile_decodes":decoded,"all_tiles_ready_ms":ready_tiles_ms,"full_developed_ready_ms":full_ready_ms,
-        "matches_fresh_full_decode":true,"regional_spot_samples":tile_samples,"regional_spot_differences":differences,
+        "matches_fresh_full_decode":true,"matches_legacy_full_development":true,"legacy_compared_samples":frame.rgb.len(),
+        "legacy_differing_samples":legacy_differences,"completion":completion,"regional_spot_samples":tile_samples,"regional_spot_differences":differences,
         "regional_maximum_absolute_error":maximum,"full_sha256":format!("{:x}",hasher.finalize()),"source_unchanged":state.source.unchanged()}),
+    )
+}
+
+/// Selection-return validation through the same asynchronous worker as the UI.
+pub fn probe_resume(paths: [PathBuf; 2]) -> anyhow::Result<serde_json::Value> {
+    use anyhow::{ensure, Context};
+    let sources = [Source::open(&paths[0])?, Source::open(&paths[1])?];
+    ensure!(
+        sources.iter().all(|s| s.tiles.len() > 6),
+        "Use sources with more than six tiles for partial-return validation"
+    );
+    let settings = Settings {
+        viewport: [128, 128],
+        mode: Mode::Click,
+        ..Settings::default()
+    };
+    let worker = Worker::new();
+    let request = |generation: u64, side: usize| Request {
+        generation,
+        pair: [
+            (side as PhotoId + 1, paths[side].clone()),
+            (side as PhotoId + 1, paths[side].clone()),
+        ],
+        settings: settings.clone(),
+        ready: [None, None],
+    };
+    let snapshot = |generation: u64, minimum: usize| -> anyhow::Result<(Progress, f64)> {
+        let started = Instant::now();
+        loop {
+            ensure!(
+                started.elapsed() < Duration::from_secs(60),
+                "Selection-return probe timed out"
+            );
+            match worker
+                .events
+                .recv_timeout(Duration::from_secs(30))
+                .context("Waiting for selection-return snapshot")?
+            {
+                Event::Snapshot {
+                    generation: current,
+                    progress,
+                    ..
+                } if current == generation && progress.done[0] >= minimum => {
+                    ensure!(progress.done[0] < progress.total[0], "Source completed before partial-return validation; use a larger tiled source");
+                    return Ok((progress, started.elapsed().as_secs_f64() * 1000.));
+                }
+                Event::Unsupported { reason, .. } => anyhow::bail!("{reason}"),
+                Event::Complete { .. } => {
+                    anyhow::bail!("Source completed before partial-return validation")
+                }
+                _ => {}
+            }
+        }
+    };
+    worker.request(request(1, 0));
+    let (initial, _) = snapshot(1, 7)?;
+    worker.request(request(2, 1));
+    let (other, _) = snapshot(2, 1)?;
+    worker.request(request(3, 0));
+    let (returned, return_ms) = snapshot(3, 0)?;
+    ensure!(
+        returned.done[0] >= initial.done[0],
+        "Partial source tiles were discarded after changing selection"
+    );
+    worker.pause();
+    worker.request(request(4, 0));
+    let (resumed, resume_ms) = snapshot(4, 0)?;
+    ensure!(
+        resumed.done[0] >= returned.done[0],
+        "Pause discarded partial source tiles"
+    );
+    worker.clear();
+    worker.request(request(5, 1));
+    worker.request(request(6, 0));
+    let (cleared, _) = snapshot(6, 0)?;
+    ensure!(
+        cleared.done[0] <= 6,
+        "Explicit clear did not discard retained tiles"
+    );
+    ensure!(
+        sources.iter().all(Source::unchanged),
+        "Source changed during selection-return probe"
+    );
+    Ok(
+        serde_json::json!({"success":true,"sources":paths,"native_runtime":jxl::Library::installed().is_ok(),
+        "initial_partial":initial,"other_partial":other,"first_return_snapshot":returned,
+        "first_pause_resume_snapshot":resumed,"first_after_clear_snapshot":cleared,
+        "return_snapshot_ms":return_ms,"pause_resume_snapshot_ms":resume_ms,"sources_unchanged":true,
+        "note":"Actual asynchronous worker; first snapshots prove retained partial progress before new decode work. Not GUI presentation latency."}),
     )
 }
 
@@ -1016,7 +1192,7 @@ pub fn probe_pair(
         "Neither paired preview showed concurrent A/B progress"
     );
     for side in 0..2 {
-        let reference = crate::decode::decode(&paths[side])?;
+        let reference = crate::decode::decode_dng_reference(&paths[side])?;
         let frame = frames[side].as_ref().unwrap();
         ensure!(
             frame.size() == reference.size() && frame.rgb == reference.rgb,
@@ -1141,6 +1317,163 @@ mod tests {
             Work::Batch(indices) => indices.clone(),
         }
     }
+    fn selection_request(generation: u64, id: PhotoId, path: &std::path::Path) -> Request {
+        Request {
+            generation,
+            pair: [(id, path.to_owned()), (id, path.to_owned())],
+            settings: Settings {
+                viewport: [64, 64],
+                camera: crate::model::Camera {
+                    zoom: crate::model::Zoom::Fixed(1.),
+                    ..Default::default()
+                },
+                ..Settings::default()
+            },
+            ready: [None, None],
+        }
+    }
+    fn selection_snapshot(worker: &Worker, generation: u64, minimum: usize) -> Progress {
+        let deadline = Instant::now() + Duration::from_secs(20);
+        loop {
+            match worker
+                .events
+                .recv_timeout(deadline.saturating_duration_since(Instant::now()))
+                .expect("Partial tile snapshot")
+            {
+                Event::Snapshot {
+                    generation: current,
+                    progress,
+                    ..
+                } if current == generation && progress.done[0] >= minimum => {
+                    assert!(
+                        progress.done[0] < progress.total[0],
+                        "Selection must remain incomplete"
+                    );
+                    return progress;
+                }
+                Event::Unsupported { reason, .. } => panic!("{reason}"),
+                Event::Complete { .. } => panic!("Source completed before selection-return test"),
+                _ => {}
+            }
+        }
+    }
+    #[test]
+    fn production_worker_reuses_partial_selections_and_pause_but_honors_clear_barriers() {
+        let a = crate::dng::tiles::fixture("worker-return-a", 1024, 512);
+        let b = crate::dng::tiles::fixture("worker-return-b", 1024, 512);
+        let worker = Worker::new();
+        worker.request(selection_request(1, 1, &a));
+        let before = selection_snapshot(&worker, 1, 12);
+        worker.request(selection_request(2, 2, &b));
+        selection_snapshot(&worker, 2, 1);
+        worker.request(selection_request(3, 1, &a));
+        let returned = selection_snapshot(&worker, 3, 1);
+        assert!(returned.done[0] >= before.done[0]);
+        worker.pause();
+        worker.request(selection_request(4, 1, &a));
+        let resumed = selection_snapshot(&worker, 4, 1);
+        assert!(resumed.done[0] >= returned.done[0]);
+        // A superseded load after Clear must not cause the barrier to be drained.
+        worker.clear();
+        worker.request(selection_request(5, 2, &b));
+        worker.request(selection_request(6, 1, &a));
+        let cleared = selection_snapshot(&worker, 6, 1);
+        assert!(
+            cleared.done[0] <= 6,
+            "Explicit Clear must discard retained tiles"
+        );
+    }
+    #[test]
+    fn production_worker_rejects_retained_tiles_for_a_different_path_or_revision() {
+        let a = crate::dng::tiles::fixture("worker-path-a", 1024, 512);
+        let b = crate::dng::tiles::fixture("worker-path-b", 1024, 512);
+        let worker = Worker::new();
+        worker.request(selection_request(1, 1, &a));
+        selection_snapshot(&worker, 1, 12);
+        worker.request(selection_request(2, 1, &b));
+        assert!(selection_snapshot(&worker, 2, 1).done[0] <= 6);
+        selection_snapshot(&worker, 2, 12);
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&b)
+            .unwrap()
+            .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
+            .unwrap();
+        worker.request(selection_request(3, 1, &b));
+        assert!(selection_snapshot(&worker, 3, 1).done[0] <= 6);
+    }
+    #[test]
+    fn successful_batch_tiles_survive_other_cancelled_or_failed_results() {
+        let (mut state, _) = image_state("partial-batch-results", [64, 48], |_, _| [1234; 3]);
+        let first = state.source.tiles[0].take().unwrap();
+        let last = state.source.tiles[2].take().unwrap();
+        let display = last.display.clone();
+        state.source.tiles.iter_mut().for_each(|slot| *slot = None);
+        let result = commit_batch(
+            &mut state,
+            vec![
+                (0, Ok(first)),
+                (1, Err(anyhow::anyhow!("Image decode cancelled"))),
+                (2, Ok(last)),
+                (3, Err(anyhow::anyhow!("Another failure"))),
+            ],
+        );
+        assert_eq!(result.unwrap_err().to_string(), "Image decode cancelled");
+        assert!(state.source.tiles[0].is_some() && state.source.tiles[1].is_none());
+        assert!(Arc::ptr_eq(
+            &display,
+            &state.source.tiles[2].as_ref().unwrap().display
+        ));
+    }
+    #[test]
+    fn streaming_checkerboard_distinguishes_outside_bounds_from_missing_interior_tiles() {
+        let (mut state, _) = image_state("stream-checkerboard", [64, 48], |_, _| [65535, 0, 0]);
+        state.source.tiles[0] = None;
+        let settings = Settings {
+            viewport: [128, 128],
+            camera: crate::model::Camera {
+                zoom: crate::model::Zoom::Fixed(1.),
+                ..Default::default()
+            },
+            ..Settings::default()
+        };
+        for mode in [Mode::Click, Mode::Slider] {
+            let settings = Settings {
+                mode,
+                ..settings.clone()
+            };
+            let output = pixels(&state, [64, 48], &settings);
+            let at = |x: usize, y: usize| &output[(y * 128 + x) * 4..(y * 128 + x + 1) * 4];
+            assert_eq!(at(0, 0), [22, 22, 22, 255]);
+            assert_eq!(at(16, 0), [19, 19, 19, 255]);
+            assert_eq!(at(32, 40), [30, 30, 30, 255]);
+            assert_eq!(at(48, 40), [0, 0, 255, 255]);
+        }
+    }
+    #[test]
+    fn retained_coarse_tiles_are_refined_without_another_coarse_decode() {
+        let settings = Settings {
+            mode: Mode::Click,
+            viewport: [32, 16],
+            ..Settings::default()
+        };
+        let (mut states, job) = empty_pair("retained-coarse-refine", settings);
+        let state = states.get_mut(&1).unwrap();
+        state.source.progressive_hint = true;
+        let index = first_indices(&next_round(&states, &job, false, 6, true)[0].work)[0];
+        states.get_mut(&1).unwrap().source.tiles[index] = Some(Tile {
+            raw: Vec::new(),
+            raw_size: [16, 16],
+            display: Arc::new(Frame {
+                width: 2,
+                height: 2,
+                rgb: vec![123; 12],
+            }),
+            ratio: 8,
+        });
+        let plans = next_round(&states, &job, false, 6, true);
+        assert!(matches!(&plans[0].work, Work::Batch(indices) if indices.contains(&index)));
+    }
     #[test]
     fn loading_status_reports_progress_without_decoder_details() {
         for mode in [Mode::Slider, Mode::Diff] {
@@ -1163,6 +1496,16 @@ mod tests {
                 "DNG tiles A 0/128 · B 0/128 · {detail}preview; exact tools wait for full development"
             ));
         }
+    }
+    #[test]
+    fn completed_tiles_report_exact_development_instead_of_more_loading() {
+        let (state, _) = image_state("finishing-status", [64, 48], |_, _| [0; 3]);
+        let path = crate::dng::tiles::fixture("finishing-status-request", 64, 48);
+        let job = selection_request(1, 1, &path);
+        let states = HashMap::from([(1, state)]);
+        let (progress, status) = progress_status(&job, &states, 0);
+        assert_eq!(progress.done, progress.total);
+        assert!(status.ends_with("preparing full-resolution tools"));
     }
     #[test]
     fn slider_queues_start_on_opposite_sides_of_the_divider_and_move_with_it() {

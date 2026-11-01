@@ -22,6 +22,8 @@ def main():
     parser.add_argument("--corpus", type=Path, default=Path("E:/Documents/AI/corpus/3 этаж single/halo"))
     parser.add_argument("--copies", type=Path, default=ROOT / "target/progressive-dng-samples")
     parser.add_argument("--output", type=Path, required=True)
+    parser.add_argument("--require-tile-completion", action="store_true",
+        help="Require every input to complete from developed tiles without a full LibRaw pass")
     args = parser.parse_args()
     originals = sorted(args.corpus.glob("*.dng"))
     copies = sorted(args.copies.glob("*.dng"))
@@ -36,6 +38,11 @@ def main():
             raise RuntimeError(f"{path}: {process.stderr}\n{process.stdout}")
         record = json.loads(process.stdout.strip().splitlines()[-1])
         assert record["success"] and record["matches_fresh_full_decode"] and record["source_unchanged"]
+        assert record["matches_legacy_full_development"] and record["legacy_differing_samples"] == 0
+        assert record["legacy_compared_samples"] == record["size"][0] * record["size"][1] * 3
+        if args.require_tile_completion:
+            assert record["completion"]["path"] == "developed-tiles", record["completion"]
+            assert record["completion"]["development_ms"] == 0, record["completion"]
         assert record["total_entropy_tile_decodes"] == record["total_tiles"]
         assert record["views"][2]["new_tile_decodes"] == 0
         assert identity(path) == before
@@ -54,11 +61,14 @@ def main():
             "all_tiles_median_ms": statistics.median(row["all_tiles_ready_ms"] for row in rows),
             "full_developed_median_ms": statistics.median(row["full_developed_ready_ms"] for row in rows),
             "exact_full_matches": sum(row["matches_fresh_full_decode"] for row in rows),
+            "legacy_full_pixel_matches": sum(row["matches_legacy_full_development"] for row in rows),
+            "developed_tile_completions": sum(row["completion"]["path"] == "developed-tiles" for row in rows),
+            "completion_median_ms": statistics.median(row["full_developed_ready_ms"] - row["all_tiles_ready_ms"] for row in rows),
             "regional_spot_maximum_error": max(row["regional_maximum_absolute_error"] for row in rows)})
     result = {"success": True, "files": len(records), "source_hashes_unchanged": True,
         "executable": str(args.exe), "executable_sha256": identity(args.exe)["sha256"],
         "summary": summary, "sources": identities,
-        "scope": "Fresh sequential workers; six inner tile threads; source hashing warms Windows cache. Visibility is 512x512 at 100%; no GPU upload/presentation timed. Regional development is provisional; final equality is relative to each input, including lossy copies."}
+        "scope": "Fresh sequential workers; six inner tile threads; source hashing warms Windows cache. Visibility is 512x512 at 100%; no GPU upload/presentation timed. Every final RGB16 sample is compared with independent legacy whole-frame LibRaw, outside ready timers. Equality is relative to each input, including lossy copies."}
     (args.output / "manifest.json").write_text(json.dumps(result, indent=2) + "\n", encoding="utf-8")
     print(json.dumps({k: v for k, v in result.items() if k != "sources"}, indent=2))
 

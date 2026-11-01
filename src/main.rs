@@ -55,6 +55,9 @@ struct Args {
     /// Exercise visible DNG tiles, pan reuse and exact idle completion without a window.
     #[arg(long)]
     stream_probe: bool,
+    /// Validate partial DNG selection return, pause preservation and explicit clear.
+    #[arg(long)]
+    stream_resume_probe: bool,
     /// Validate paired tile loading and preview composition without a window.
     #[arg(long, value_parser = ["slider", "diff", "slider-fit", "diff-fit"])]
     stream_pair_probe: Option<String>,
@@ -71,6 +74,23 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    if args.stream_resume_probe {
+        let result = (|| -> anyhow::Result<_> {
+            anyhow::ensure!(
+                args.paths.len() == 2,
+                "A selection-return probe requires exactly two input files"
+            );
+            streaming::probe_resume([args.paths[0].clone(), args.paths[1].clone()])
+        })();
+        match result {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("DNG selection-return probe failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if let Some(mode) = &args.stream_pair_probe {
         let result = (|| -> anyhow::Result<_> {
             anyhow::ensure!(

@@ -40,6 +40,15 @@ struct RawView {
     bitmap_ns: u64,
 }
 unsafe extern "C" {
+    fn diff_raw_matching_tile_policy(
+        original: *const c_void,
+        original_length: usize,
+        region: *const c_void,
+        region_length: usize,
+        width: u32,
+        height: u32,
+        orientation: u32,
+    ) -> u32;
     fn diff_raw_open_cancellable(
         bytes: *const c_void,
         length: usize,
@@ -66,6 +75,27 @@ unsafe extern "C" {
     fn libraw_get_iwidth(raw: *mut c_void) -> i32;
     fn libraw_get_iheight(raw: *mut c_void) -> i32;
     fn libraw_close(raw: *mut c_void);
+}
+
+/// Match the effective, fixed RGB processing state without unpacking either input.
+pub(crate) fn matching_tile_policy(
+    original: &[u8],
+    region: &[u8],
+    size: [u32; 2],
+    orientation: u32,
+) -> Option<u16> {
+    let white = unsafe {
+        diff_raw_matching_tile_policy(
+            original.as_ptr().cast(),
+            original.len(),
+            region.as_ptr().cast(),
+            region.len(),
+            size[0],
+            size[1],
+            orientation,
+        )
+    };
+    (white > 0 && white <= 65535).then_some(white as u16)
 }
 
 struct Cancellation<'a>(&'a (dyn Fn() -> bool + Sync));
@@ -292,6 +322,20 @@ pub fn dimensions(path: &Path) -> Result<[u32; 2]> {
 
 pub fn decode(path: &Path) -> Result<Arc<Frame>> {
     decode_cancellable(path, &|| false)
+}
+
+/// Independent legacy whole-frame reference for streaming validation only.
+pub(crate) fn decode_dng_reference(path: &Path) -> Result<Arc<Frame>> {
+    if let Ok(library) = crate::jxl::Library::installed() {
+        return crate::dng::tiles::Source::open(path)?
+            .decode_full_native_reference(library, &|| false);
+    }
+    let image = raw_cancellable(path, false, &|| false)?.into_rgb16();
+    Ok(Arc::new(Frame {
+        width: image.width(),
+        height: image.height(),
+        rgb: image.into_raw(),
+    }))
 }
 
 /// Develop an in-memory, uncompressed DNG on the caller's background worker.

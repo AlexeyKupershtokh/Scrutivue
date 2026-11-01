@@ -6,9 +6,10 @@ use crate::{
 };
 use std::{
     path::{Path, PathBuf},
-    sync::Arc,
+    sync::{Arc, OnceLock},
     time::SystemTime,
 };
+mod completion;
 
 pub struct Tile {
     pub raw: Vec<u16>,
@@ -16,9 +17,17 @@ pub struct Tile {
     pub display: Arc<Frame>,
     pub ratio: u32,
 }
+#[derive(serde::Serialize)]
+pub struct FinishTimings {
+    pub assembly_ms: f64,
+    pub development_ms: f64,
+    pub path: &'static str,
+    pub fallback_reason: Option<&'static str>,
+}
 pub struct Source {
     path: PathBuf,
     modified: Option<SystemTime>,
+    created: Option<SystemTime>,
     length: u64,
     map: memmap2::Mmap,
     pub raw_size: [u32; 2],
@@ -30,6 +39,7 @@ pub struct Source {
     offsets: Vec<u32>,
     lengths: Vec<u32>,
     metadata: Vec<([u8; 12], Vec<u8>)>,
+    pointwise_white: OnceLock<Option<u16>>,
     pub tiles: Vec<Option<Tile>>,
 }
 impl Source {
@@ -149,6 +159,7 @@ impl Source {
         Ok(Self {
             path: path.to_owned(),
             modified: stat.modified().ok(),
+            created: stat.created().ok(),
             length: stat.len(),
             map,
             raw_size,
@@ -160,13 +171,19 @@ impl Source {
             offsets,
             lengths,
             metadata,
+            pointwise_white: OnceLock::new(),
             tiles: (0..count).map(|_| None).collect(),
         })
     }
     pub fn unchanged(&self) -> bool {
-        self.path
-            .metadata()
-            .is_ok_and(|s| s.len() == self.length && s.modified().ok() == self.modified)
+        self.path.metadata().is_ok_and(|s| {
+            s.len() == self.length
+                && s.modified().ok() == self.modified
+                && s.created().ok() == self.created
+        })
+    }
+    pub fn matches(&self, path: &Path) -> bool {
+        self.path == path && self.modified.is_some() && self.unchanged()
     }
     pub fn origin(&self, index: usize) -> [u32; 2] {
         let nx = self.raw_size[0].div_ceil(self.tile_size[0]);
@@ -273,6 +290,7 @@ impl Source {
         library: Option<&Arc<jxl::Library>>,
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<Tile> {
+        ensure!(!cancelled(), "Image decode cancelled");
         let (raw, raw_size) = if let Some(library) = library {
             let mut session = self.session(index, library.clone())?;
             session.advance(1, &|| cancelled())?;
@@ -401,7 +419,8 @@ impl Source {
             rgb,
         }))
     }
-    pub fn finish(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<Arc<Frame>> {
+    fn assemble(&self, cancelled: &(dyn Fn() -> bool + Sync)) -> Result<Vec<u8>> {
+        ensure!(!cancelled(), "Image decode cancelled");
         ensure!(
             self.tiles
                 .iter()
@@ -428,21 +447,39 @@ impl Source {
             let w = self.tile_size[0].min(self.raw_size[0] - x);
             let h = self.tile_size[1].min(self.raw_size[1] - y);
             ensure!(
-                tile.raw_size[0] >= w && tile.raw_size[1] >= h,
+                tile.raw_size[0] >= w
+                    && tile.raw_size[1] >= h
+                    && tile.raw.len() == tile.raw_size[0] as usize * tile.raw_size[1] as usize * 3,
                 "Truncated edge tile"
             );
-            for row in 0..h {
+        }
+        let nx = self.raw_size[0].div_ceil(self.tile_size[0]) as usize;
+        // Rows are disjoint. On matching-endian TIFFs copy complete sample spans
+        // instead of serially re-encoding every channel of every 45 MP pixel.
+        out[base..]
+            .par_chunks_mut(self.raw_size[0] as usize * 6)
+            .enumerate()
+            .try_for_each(|(y, row)| -> Result<()> {
                 ensure!(!cancelled(), "Image decode cancelled");
-                for column in 0..w {
-                    let from = ((row * tile.raw_size[0] + column) * 3) as usize;
-                    let to = base + (((y + row) * self.raw_size[0] + x + column) * 6) as usize;
-                    for c in 0..3 {
-                        out[to + c * 2..to + c * 2 + 2]
-                            .copy_from_slice(&e.put16(tile.raw[from + c]));
+                let ty = y / self.tile_size[1] as usize;
+                let local_y = y % self.tile_size[1] as usize;
+                for tx in 0..nx {
+                    let tile = self.tiles[ty * nx + tx].as_ref().unwrap();
+                    let x = tx * self.tile_size[0] as usize;
+                    let width = (self.tile_size[0] as usize).min(self.raw_size[0] as usize - x);
+                    let from = local_y * tile.raw_size[0] as usize * 3;
+                    let samples = &tile.raw[from..from + width * 3];
+                    let target = &mut row[x * 6..x * 6 + width * 6];
+                    if e.0 == cfg!(target_endian = "little") {
+                        target.copy_from_slice(bytemuck::cast_slice(samples));
+                    } else {
+                        for (bytes, &value) in target.chunks_exact_mut(2).zip(samples) {
+                            bytes.copy_from_slice(&e.put16(value));
+                        }
                     }
                 }
-            }
-        }
+                Ok(())
+            })?;
         let mut entries: Vec<_> = ifd
             .entries
             .iter()
@@ -477,15 +514,28 @@ impl Source {
         }
         let next = ifd.offset + 2 + entries.len() * 12;
         out[next..next + 4].copy_from_slice(&e.put32(ifd.next));
-        let frame = decode::develop_dng_bytes(&out, cancelled)?;
-        ensure!(self.unchanged(), "Source changed during DNG development");
-        Ok(frame)
+        Ok(out)
     }
     /// Match streamed completion and ordinary full decode to the SAME native
     /// reconstruction/rounding policy for supported LinearRaw JXL sources.
     pub fn decode_full_native(
+        self,
+        library: Arc<jxl::Library>,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Arc<Frame>> {
+        self.decode_native(library, false, cancelled)
+    }
+    pub fn decode_full_native_reference(
+        self,
+        library: Arc<jxl::Library>,
+        cancelled: &(dyn Fn() -> bool + Sync),
+    ) -> Result<Arc<Frame>> {
+        self.decode_native(library, true, cancelled)
+    }
+    fn decode_native(
         mut self,
         library: Arc<jxl::Library>,
+        reference: bool,
         cancelled: &(dyn Fn() -> bool + Sync),
     ) -> Result<Arc<Frame>> {
         let placeholder = Arc::new(Frame {
@@ -494,22 +544,32 @@ impl Source {
             rgb: Vec::new(),
         });
         let mut tiles = std::mem::take(&mut self.tiles);
+        let develop_tiles = !reference && self.completion_white().is_some();
         tiles
             .par_iter_mut()
             .enumerate()
             .try_for_each(|(index, slot)| -> Result<()> {
                 let mut session = self.session(index, library.clone())?;
                 session.advance(1, &|| cancelled())?;
+                let display = if develop_tiles {
+                    self.develop(&session.pixels, session.size, 1, cancelled)?
+                } else {
+                    placeholder.clone()
+                };
                 *slot = Some(Tile {
                     raw: std::mem::take(&mut session.pixels),
                     raw_size: session.size,
-                    display: placeholder.clone(),
+                    display,
                     ratio: 1,
                 });
                 Ok(())
             })?;
         self.tiles = tiles;
-        self.finish(cancelled)
+        if reference {
+            self.finish_reference(cancelled)
+        } else {
+            self.finish(cancelled)
+        }
     }
 }
 
@@ -530,6 +590,87 @@ pub(crate) fn fixture(name: &str, w: u32, h: u32) -> std::path::PathBuf {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn cancelled_display_decode_stops_before_accessing_a_tile() {
+        let path = fixture("cancel-before-tile", 64, 48);
+        let source = Source::open(&path).unwrap();
+        let error = source
+            .decode_display(usize::MAX, None, &|| true)
+            .err()
+            .unwrap();
+        assert_eq!(error.to_string(), "Image decode cancelled");
+    }
+    #[test]
+    fn source_identity_requires_the_same_path_and_revision() {
+        let path = fixture("revision-check", 64, 48);
+        let other = fixture("revision-check-other", 64, 48);
+        let source = Source::open(&path).unwrap();
+        assert!(source.matches(&path));
+        assert!(!source.matches(&other));
+        std::fs::OpenOptions::new()
+            .write(true)
+            .open(&path)
+            .unwrap()
+            .set_modified(SystemTime::now() + std::time::Duration::from_secs(2))
+            .unwrap();
+        assert!(!source.matches(&path));
+    }
+    #[test]
+    fn assembly_copies_exact_samples_for_both_endiannesses_and_clipped_edges() {
+        for little in [true, false] {
+            let e = Endian(little);
+            let path = fixture(&format!("assembly-{little}"), 65, 49);
+            std::fs::write(&path, super::super::tests::synthetic_size(e, false, 65, 49)).unwrap();
+            let mut source = Source::open(&path).unwrap();
+            let placeholder = Arc::new(Frame {
+                width: 0,
+                height: 0,
+                rgb: Vec::new(),
+            });
+            let sample = |x: u32, y: u32, c: u32| ((x * 503 + y * 997 + c * 11027) % 65536) as u16;
+            for index in 0..source.tiles.len() {
+                let [x, y] = source.origin(index);
+                // Alternate genuinely clipped edge outputs and padded outputs.
+                let size = if index % 2 == 0 {
+                    [16, 16]
+                } else {
+                    [16.min(65 - x), 16.min(49 - y)]
+                };
+                let raw = (0..size[1])
+                    .flat_map(|dy| {
+                        (0..size[0])
+                            .flat_map(move |dx| (0..3).map(move |c| sample(x + dx, y + dy, c)))
+                    })
+                    .collect();
+                source.tiles[index] = Some(Tile {
+                    raw,
+                    raw_size: size,
+                    display: placeholder.clone(),
+                    ratio: 1,
+                });
+            }
+            let out = source.assemble(&|| false).unwrap();
+            let tiff = Tiff::parse(&out).unwrap().unwrap();
+            let ifd = &tiff.ifds[0];
+            let base = tiff.value(ifd, 273, 0).unwrap() as usize;
+            assert_eq!(tiff.value(ifd, 259, 0).unwrap(), 1);
+            assert_eq!(tiff.value(ifd, 279, 0).unwrap(), 65 * 49 * 6);
+            for y in 0..49 {
+                for x in 0..65 {
+                    for c in 0..3 {
+                        let p = base + ((y * 65 + x) * 3 + c) as usize * 2;
+                        assert_eq!(e.u16(&out[p..p + 2]), sample(x, y, c));
+                    }
+                }
+            }
+            let visits = std::sync::atomic::AtomicUsize::new(0);
+            assert!(source
+                .assemble(&|| visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 3)
+                .is_err());
+            source.tiles.last_mut().unwrap().as_mut().unwrap().raw.pop();
+            assert!(source.assemble(&|| false).is_err());
+        }
+    }
     #[test]
     fn regional_white_level_is_independent_of_tile_content() {
         let path = fixture("regional-exposure", 64, 64);

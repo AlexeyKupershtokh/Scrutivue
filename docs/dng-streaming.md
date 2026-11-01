@@ -9,8 +9,11 @@ passes. No embedded JPEG is used for the main view.
 
 - At 100% or above, decode the tiles intersecting the viewport, with sampling
   context, before touching unrelated tiles. Keep decoded raw/developed tiles for
-  the selected pair. Panning reprioritizes missing tiles; revisiting a cached
-  area does not decode them again.
+  the selected pair and a bounded LRU of inactive incomplete sources. Panning
+  reprioritizes missing tiles; revisiting a retained area does not decode it again.
+  Changing selections or temporarily using a non-streaming mode pauses loading,
+  rather than deleting every partial tile. A resumed selection publishes cached
+  pixels before starting another decode batch.
 - **Slider:** A and B load simultaneously from their respective sides of the
   divider: A toward the left, B toward the right. Tile ordering uses oriented,
   cropped display coordinates, not raw TIFF tile indices. Moving the divider
@@ -39,36 +42,99 @@ passes. No embedded JPEG is used for the main view.
   final development. Low-zoom batches expand after the first update without adding
   threads. Provisional viewport snapshots are throttled to approximately 40 ms;
   offscreen completion updates progress without recompositing an unchanged view.
-- Once raw tiles are complete, assemble an uncompressed DNG **in memory using
-  original metadata** and run the pinned LibRaw's normal full development.
-  There is no second JXL entropy decode. The final frame uses the existing GPU,
-  high-pass, navigator, picker, statistics and frame-identity paths.
+- Once full-resolution tiles are complete, eligible sources produce the final
+  RGB16 frame **directly from their already developed tiles**, applying the
+  original crop/orientation. There is no second LibRaw development or JXL entropy
+  decode on this path. Eligibility is checked per source and again against the
+  complete image's actual sample maximum; see the guarded completion policy below.
+  Other sources retain in-memory uncompressed DNG assembly with original metadata
+  and normal full LibRaw development. Both paths feed the existing GPU, high-pass,
+  navigator, picker, statistics and frame-identity paths.
+- Single/Slider draw the outside-image checkerboard during streaming, not only
+  after full development. Missing interior tiles remain gray, not checkerboard.
+  When tile loading ends, the status changes to "preparing full-resolution tools";
+  uncertified sources still need full development. Neither coarse tiles nor
+  eight-bit viewport pixels can become analysis data. Final RGB16 assembly copies
+  disjoint row blocks in parallel. The fallback DNG assembly uses bulk sample
+  copies for matching-endian TIFFs and conversion for opposite-endian TIFFs.
 - Display-tile development is **provisional**: regional LibRaw development can
   differ from whole-frame development. Tiles now keep the metadata white level;
   per-tile maximum normalization is explicitly disabled (see the exposure fix
   below), rather than accepting brightness seams as a preview limitation.
   The preview status explicitly says exact tools are waiting. Partial pixels
-  are never inserted into analysis caches. High-pass still requests ordinary
-  full decoding because it requires correct neighboring-pixel context.
+  are never inserted into analysis caches. High-pass still requires a complete
+  frame for neighboring-pixel context; ordinary full native decoding can now
+  construct that frame using the same guarded tile-completion path.
 
 Unsupported sources, spatial opcodes/linearization/patterned black levels,
 oversized files, mixed non-DNG pairs and decode failures use the existing full
 path. This is not a CFA/NEF partial-development implementation. Regional decode
-does not run on the UI thread. Source mappings are read-only; source size/mtime
+does not run on the UI thread. Source mappings are read-only; source size/mtime/creation time
 are checked before publishing full completion. Stale view generations are not
 displayed and large allocations are released by workers.
 
 Supported image geometry is limited by a **768 MiB per-source nominal raw plus
-developed estimate**, with at most the selected pair retained. This is not a hard
-allocation or process peak-RSS cap: padded edge tiles, native working memory,
-full completion, renderer buffers, mappings and the final frames can add memory.
-Tile cache lifetime currently covers the live
-selection/loading session; it is not a persistent on-disk raw tile cache.
+developed estimate**. The active pair is protected from partial-cache eviction.
+Inactive incomplete sources have a separate **six-entry / 768 MiB tile-payload
+LRU**, evicting the least recently selected sources until both bounds are met.
+The byte count includes raw tile capacity and developed display pixels, not
+mappings or native workspaces. This is not a hard allocation or process peak-RSS
+cap: padded edge tiles, native working memory, full completion, renderer buffers,
+mappings and final frames can add memory.
+
+Inactive native decoder sessions are released, but completed and coarse display
+tiles survive within the LRU. A tile interrupted before completion may restart;
+already completed tiles do not. Successful results from a parallel batch survive
+even when another result fails or is cancelled. Returning sources are checked for
+the same path and file revision on the worker. Explicit library clearing is a hard
+barrier which discards partial states, even with superseded requests queued.
+The partial cache is memory-only, not a persistent on-disk raw tile cache.
 Completed streamed frames also seed the existing revision-aware full-frame
 cache. Reselecting a retained source can retrieve that frame asynchronously,
 without redeveloping it or performing filesystem checks on the UI thread.
 If one selected frame is already complete, the tile worker reuses it while
-loading the other source instead of decoding the completed side again.
+loading the other source instead of decoding the completed side again. Completed
+inactive frames are not additionally pinned by the partial-source LRU; the existing
+full-frame cache has its own six-entry / 1 GiB policy.
+
+## Guarded completion from developed tiles
+
+The optimization is a per-source capability check, not a filename/camera allowlist
+or a promise for every LinearRaw DNG. A header-only bridge compares the effective
+processing state of the original source and the compact region input using the
+unchanged, pinned LibRaw fork. It requires a single, unambiguous raw IFD: matching
+calibration alone must not authorize selecting another same-sized raw frame.
+It requires chunky RGB16 DNG with no CFA/Foveon,
+identity input curve, zero black corrections, fixed valid camera white balance,
+matching color matrices/multipliers/white samples/gamma and the same RGB conversion
+policy. Spatial zero repair, mixing, denoise, aberration, exposure and highlight
+processing cannot participate. Active margins, stretching and ambiguous orientation
+also reject the fast completion; normal DefaultCrop and all eight TIFF orientations
+are supported by final assembly and tested against the legacy output.
+
+At completion, every tile must have final raw samples and a correctly sized
+developed RGB16 frame. The actual whole-image maximum is computed over real raw
+pixels, including cropped-away pixels but excluding padded edge-tile samples,
+matching the old whole-frame normalization scope. If the pinned LibRaw
+`adjust_maximum` policy would change the declared white level (a positive peak
+strictly between 75% of white and white), completion uses the old full development.
+Thus a saturated padded border cannot incorrectly certify an unsaturated image.
+
+Eligible frames are joined from **16-bit developed tile samples**, not viewport
+textures or up-converted eight-bit previews. They become authoritative only after
+completion checks and source revision validation. This applies to both streaming
+completion and ordinary native full decoding, so metrics/high-pass/cache identities
+do not depend on which loading route won a race. Unknown cases retain the old full
+LibRaw path rather than silently changing their exposure or white balance.
+
+Header qualification currently needs a temporary original-layout copy to preserve
+metadata offsets; it is limited to containers no larger than **256 MiB**. Larger
+containers can still stream within the existing geometry limits but use full
+LibRaw completion. This temporary copy is released on the worker immediately;
+the source-file mapping remains read-only. Streaming warms this lazy check
+**after publishing its first tile snapshot**, rather than delaying the first
+visible update while qualifying both source headers. `SCRUTIVUE_TILE_POLICY_TRACE=1` enables
+header-check diagnostics on stderr for investigation, not normal UI status.
 
 ## Native runtime in Windows distributions
 
@@ -239,12 +305,20 @@ The production `--stream-probe` command loads a 512x512 100% view, pans, returns
 optionally obtains a coarse stage, fills cached raw tiles, develops the complete
 frame, and compares it sample-for-sample with independent ordinary full decoding.
 It also reports regional-development differences separately, rather than
-claiming every provisional tile is authoritative.
+claiming every provisional tile is authoritative. `completion.assembly_ms` and
+`completion.development_ms` separate assembly from extra full development;
+`completion.path` is `developed-tiles` or `full-libraw`, with a fallback reason.
+Every final RGB16 sample is additionally compared against an independent legacy
+full LibRaw development outside the ready timers, not just a fresh invocation
+of the new optimized decoder. Sparse regional checks are supplemental only.
 
 ```powershell
 cargo test --locked
 target/release/scrutivue.exe --stream-probe 'D:/Photos/input.dng'
+target/release/scrutivue.exe --stream-resume-probe 'D:/Photos/A.dng' 'D:/Photos/B.dng'
 python scripts/validate_dng_streaming.py --output target/dng-streaming-validation/NEW-run
+# For a corpus expected to qualify for the guarded tile-completion path:
+python scripts/validate_dng_streaming.py --require-tile-completion --output target/NEW-tile-completion-run
 ```
 
 Source-level tests cover orientation inverses (all eight EXIF cases), visible
@@ -253,6 +327,14 @@ cache rejection, cancellation, modified-source rejection and cached final
 equivalence. Paired tests cover divider-aware ordering, center-first Diff, actual
 cross-thread overlap, completed-source reuse, missing/coarse masks, unequal image
 dimensions and incremental/full CPU Diff agreement across zoom and gain settings.
+Partial-cache regressions cover byte/count LRU limits, protected selections,
+retained tile identity, successful results from cancelled batches, early
+checkerboard versus missing interior pixels, and both TIFF endiannesses with
+clipped edge tiles. Actual worker tests cover partial A→B→A, pause/resume, queued
+clear barriers and source path/revision invalidation. The selection-return CLI
+probe repeats selection/pause/clear scenarios on real supported inputs with more
+than six tiles, asserting retained progress in the **first** resumed snapshot,
+before another tile batch. Use sufficiently large inputs to interrupt loading.
 A native integration test exercises **8→4→2→full on one decoder**, transferring
 its exclusive ownership between threads before resuming:
 
@@ -462,3 +544,136 @@ full-resolution pixel-difference reduction work before final development.
 Generated measurements, captures and native binaries belong under `target/`.
 The legacy/root EXEs are not overwritten. No original photo, LibRaw pin, workflow
 trigger or unrelated uncommitted work was changed.
+
+## Partial-selection retention and completion-stage review, 2026-11-01
+
+The previous worker kept only the current selected pair, and normal full-render
+requests used the same destructive clear command as clearing the library. Thus
+an unfinished A→B→A selection lost its tiles, while fully developed images could
+still benefit from Services' separate frame cache. The worker now distinguishes
+pause from hard clear and retains inactive partial sources under the LRU policy
+above. Source checks, eviction, decoder destruction and assembly stay off the UI
+thread. Slider's paired divider-first and Diff's paired center-first scheduling
+are unchanged.
+
+The reported post-tile pause was reproduced on two 45 MP sources. These are
+sequential warm-storage `--stream-probe` observations, not GUI presentation times.
+The new measurements are medians of three runs; the earlier baseline was one run
+per source, so the small difference is not a rigorous isolated assembly speedup:
+
+| Source | Earlier post-tile stage | New post-tile stage | New assembly | New exact development |
+| --- | ---: | ---: | ---: | ---: |
+| Original `AK8_0036_halo0.dng` | 1873.4 ms | 1754.4 ms | 171.6 ms | 1557.5 ms |
+| Existing lossy progressive `AK8_0005_halo0` copy | 1899.8 ms | 1811.4 ms | 209.2 ms | 1570.8 ms |
+
+Completion includes buffer release, so its total is not just the two profiled
+substage timers. Exact whole-frame development remains the dominant cost; this
+change does **not** eliminate the approximately 1.8-second final stage. The
+checkerboard no longer waits for it in Single/Slider. Provisional display tiles
+are still not substituted for authoritative analysis pixels.
+
+All six new single-source runs matched the baseline RGB16 frame SHA-256 and an
+independent fresh decode; each tile completed one entropy decode, returning to
+the previous viewport decoded zero new tiles, and regional spot errors remained
+zero. Records: `target/tile-resume-review/before-{0,1}.json`,
+`after-<source>-<trial>.json` and `completion-comparison.json`.
+
+The unit suite passed **139 tests, 6 ignored**. New regressions include actual
+worker selection return/pause/clear and source invalidation, byte/count eviction,
+retained tile identity, coarse refinement without another coarse flush,
+cancelled-batch preservation, early checkerboard/readiness, and opposite-endian
+and clipped-edge assembly with cancellation. The release build passed with the
+two existing unused-function warnings.
+
+The final native release selection-return probes retained **30/726** completed
+tiles from the original and **7/54** from the progressive copy in the first
+return snapshot, and again after pause. The first snapshots after hard clear had
+6 and 0 completed tiles respectively. The 128x128 Single previews were produced
+in approximately 0.34/0.55 ms after return, and 0.24/0.20 ms after pause; these
+small-buffer worker timings are **not** whole-window presentation measurements.
+Records: `selection-return-click-{original,progressive}.json`. Two additional
+single-source probes on the final release again matched the saved frame hashes
+(`final-single-source-{0,1}.json`).
+
+Earlier exploratory self-pair Fit Diff probes (`selection-return-{original,progressive}.json`)
+also retained tile counts, but regenerated the display-only difference mip cache;
+that added about 2.1 seconds for the progressive input. The partial-source LRU
+retains source pixels, **not every historical pair's difference pyramid**, so it
+does not promise instant recomposition of all Diff views. The final selection
+probe uses Single to isolate tile retention from that separate preview cost.
+
+The final release also passed the sequential **10/10 paired matrix** in
+`target/tile-resume-review/paired-release`: original/progressive Slider and Diff
+at 100%/Fit, plus mixed-tiling Diff at both zooms. All sources progressed on both
+sides before completion; all final frames matched independent full decoding;
+the six Diff cases had **zero byte error** and all recorded source identities
+were unchanged. The saved early original Fit Slider buffer was inspected and
+its pixel values checked: 19/22 outside-image checkerboard and 30 for missing
+interior pixels. This is direct compositor evidence, not a desktop screenshot.
+
+The native progressive-pair UI smoke also passed early divider/Slider→Diff→Slider
+input, selection stress, pan/edge clamping, zoom/navigation, statistics/picker,
+fullscreen, help and preferences restart. **730** event-loop probes had **zero**
+100 ms timeouts (maximum 7.60 ms). It used `--no-capture`; no desktop screenshot
+or end-to-end visible-image latency is claimed. Report:
+`target/tile-resume-review/gui-release-no-capture/result.json`.
+
+## Verified developed-tile completion, 2026-11-01
+
+The following supersedes the earlier approximately 1.8-second finishing-stage
+limitation **for sources passing the guarded policy above**, not for arbitrary RAWs.
+Both streaming completion and ordinary native full decoding now use the same
+already-developed RGB16 tile samples when eligible. The fallback keeps the previous
+whole-frame LibRaw settings, including global maximum adjustment.
+
+The release build passed. The unit suite passed **147 tests, 6 ignored**, including
+all eight orientations, both TIFF endiannesses, actual DefaultCrop metadata,
+clipped/padded edge tiles, cancellation and comparison with independent legacy
+development. Negative controls reproduce a real exposure difference at global
+peak 60000/white 65535 and require fallback; tests also cover the exact 75%
+threshold, zero/nonzero black, missing camera WB, mismatched calibration, active
+margins, wrong orientation, coarse/missing tiles and absent developed samples.
+
+The sequential `--require-tile-completion` release matrix passed **32/32** inputs:
+30 original DNGs and the two existing lossy progressive derivatives. Every final
+RGB16 component was compared with the old full-frame LibRaw result outside ready
+timers: **4,362,338,304 compared components, zero differences**. All 32 frame
+SHA-256 values also matched the archived pre-optimization release, and all source
+SHA-256/size/mtime identities matched both the before/after checks and historical
+records. All 32 used `completion.path="developed-tiles"` and
+`completion.development_ms=0`; none silently retained the extra pass.
+
+| Completion after last raw tile | Earlier | Guarded tile completion |
+| --- | ---: | ---: |
+| Original `AK8_0036_halo0.dng` | 1873.4 ms | 94.5 ms |
+| Existing lossy progressive `AK8_0005_halo0` copy | 1899.8 ms | 91.1 ms |
+
+Across the 32 files, completion ranged **85.2–118.7 ms**, median **92.1 ms**;
+both originals' and derivatives' medians were approximately 92.1 ms. These are sequential
+warm-storage worker/probe measurements, not GPU upload or visible-window latency.
+Sources were not regenerated and the explicitly lossy copies are not represented
+as lossless. Final-build records: `target/tile-completion-review/release-32-verified/`,
+`baseline-index.json` and `validation-summary-verified.json`. Earlier equivalent
+pixel results, before lazy qualification or the final multiple-raw-IFD guard,
+are retained separately under `release-32/` and `release-32-final/`.
+
+The headless CI/package smoke now generates both a fixed-WB calibrated native
+fixture which **must** use developed-tile completion and an uncalibrated native
+fixture which **must** retain full LibRaw. Both require complete legacy RGB16
+equality, pan reuse and unchanged inputs before the statistics/LPIPS smoke.
+This adds no automatic workflow trigger or application startup dependency download.
+
+The final release's actual-worker paired matrix passed **10/10** original,
+progressive and mixed-tiling Slider/Diff cases, with zero Diff byte error and
+independent legacy whole-frame equality. Original-pair first A+B progress was
+48.6 ms in Slider and 70.7 ms in Diff, confirming that lazy qualification no longer
+blocks the first tile snapshot. Reports: `paired-release-verified/` under the review
+directory. Native selection-return probes also preserved 30/726 and 7/54 completed
+tiles in the first return and pause/resume snapshots, while explicit clear
+restarted them at 6 and 0. Reports: `selection-return-*-verified.json`.
+
+The final native UI smoke passed early paired interaction, selection stress,
+pan/edge clamping, zoom/navigation, statistics/picker, fullscreen, help and settings
+restart: **651** event-loop probes, **zero** 100 ms timeouts, maximum 6.54 ms. It used
+`--no-capture`; no desktop screenshot or end-to-end visible-image latency is
+claimed. Report: `gui-release-verified-no-capture/result.json` in the review directory.

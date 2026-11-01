@@ -1074,7 +1074,7 @@ impl Desk {
             self.clear_picker();
         }
         let Some(aid) = self.selected[0] else {
-            self.streaming.clear();
+            self.streaming.pause();
             self.stream_status.clear();
             self.rendering = false;
             return;
@@ -1096,7 +1096,7 @@ impl Desk {
             });
             return;
         }
-        self.streaming.clear();
+        self.streaming.pause();
         self.stream_status.clear();
         let Some(a) = self.frames.get(&aid) else {
             self.rendering = true;
