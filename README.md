@@ -52,4 +52,6 @@ Details, limitations and validation commands: [manual](docs/manual.md), [measure
 
 Developer-only decoder comparisons and stage timings: [DNG/JPEG XL experiments](docs/dng-jxl-experiments.md).
 
+Manual Windows CI caching, last-run timings and the proposed portable-release process: [CI and releases](docs/ci-and-releases.md).
+
 MIT; LibRaw is used under CDDL-1.0. Notices: [LICENSES](LICENSES/README.md). The Slider overview uses CC0 Nikon Z9 HE/HE* samples from raw.pixls.us. The Diff, color picker and statistics screenshot was provided by the project author. Both show the native application, not an external UI mockup.
