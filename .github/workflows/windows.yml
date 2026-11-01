@@ -87,9 +87,9 @@ jobs:
         run: python -m unittest discover -s scripts -p test_model_assets.py -v
       - name: Test native computations and caches
         id: tests
-        run: cargo test --release --locked
+        run: cargo test --release --locked --bin scrutivue
       - name: Build release
-        run: cargo build --release --locked
+        run: cargo build --release --locked --bin scrutivue
       - name: Check standalone CLI and external LPIPS
         run: python scripts/ci_smoke.py --exe target/release/scrutivue.exe
       - name: Package Windows x64 application and notices

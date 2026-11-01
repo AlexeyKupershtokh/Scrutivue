@@ -19,7 +19,7 @@ struct RawView {
     const unsigned char *data;
     uint32_t width, height, colors, bits, length, format, flip;
     // Sensor-coordinate rectangle BEFORE processing/orientation. Rust uses it
-    // to apply DNG DefaultCrop relative to ActiveArea, not a second active crop.
+    // to retain DNG ActiveArea without exposing sensor margins or cropping twice.
     uint32_t raw_width, raw_height, left, top, area_width, area_height;
     uint64_t open_ns, unpack_ns, process_ns, bitmap_ns;
 };

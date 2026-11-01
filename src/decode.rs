@@ -274,7 +274,7 @@ fn raster(path: &Path) -> Result<DynamicImage> {
     Ok(image)
 }
 
-/// Display-oriented, default-cropped dimensions from headers only. Suitable for
+/// Display-oriented dimensions (full ActiveArea for DNG) from headers only. Suitable for
 /// background file metadata; does not develop RAWs or decompress DNG JXL tiles.
 pub fn dimensions(path: &Path) -> Result<[u32; 2]> {
     if !crate::model::is_raw(path) {

@@ -1,5 +1,9 @@
 # Large-DNG statistics: latency and memory
 
+The DNG measurements below use historical DefaultCrop geometry. Since
+[0.3.1](release-0.3.1.md), the full ActiveArea is used; these timings and memory
+figures have not been relabeled as new full-frame measurements.
+
 Measured on 2026-11-01, Windows, Ryzen 5 5600 (6 cores / 12 logical CPUs).
 These are optimized **debug-dependency / `rustc -C opt-level=2`** developer-harness
 measurements, not release-build or screen-presentation timings. No source image,

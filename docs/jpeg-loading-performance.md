@@ -1,5 +1,9 @@
 # Ordinary JPEG loading: parallel, fused pixel preparation
 
+The preserved measurements below predate [0.3.1](release-0.3.1.md). The normal
+executable now includes the cumulative optimizations; JPEG geometry/pixels are
+unchanged, while DNG display now uses full ActiveArea instead of DefaultCrop.
+
 ## Diagnosis on the requested JPEG corpus
 
 `E:/Documents/AI/corpus/3 этаж single/halo` currently contains **36 actual JPEGs**,

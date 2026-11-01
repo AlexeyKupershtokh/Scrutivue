@@ -1,5 +1,9 @@
 # Local validation
 
+For the 0.3.1 full-ActiveArea policy and promoted parallel defaults, see
+[release notes](release-0.3.1.md) and [DNG geometry](dng.md). Earlier cropped-DNG
+dimensions, hashes, test counts and timings below remain historical evidence.
+
 ## Scrutivue selection, wheel zoom and statistics memory update
 
 2026-11-01: `cargo test --locked -- --include-ignored --skip profile_dng` passed

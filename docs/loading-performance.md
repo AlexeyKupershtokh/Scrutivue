@@ -1,5 +1,9 @@
 # DNG pair loading and decode-cache reliability
 
+These are historical 0.3.0 measurements with DefaultCrop applied. Since
+[0.3.1](release-0.3.1.md), DNG displays full ActiveArea; the recorded cropped
+dimensions and timings below are not measurements of that release.
+
 Measured on 2026-10-31, Windows, Ryzen 5 5600 (6 cores / 12 logical CPUs),
 NVIDIA RTX 3070 / DX12. These are optimized **debug-profile** measurements
 (`opt-level=2`), not a claimed release result. No root application executable,

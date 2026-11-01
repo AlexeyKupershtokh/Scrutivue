@@ -1,9 +1,11 @@
-//! DNG default crop and JPEG-XL transport support. Preserve camera metadata and
+//! DNG active-area geometry and JPEG-XL transport support. Preserve camera metadata and
 //! let the pinned LibRaw perform WB, camera-to-sRGB, active crop and orientation.
-//! Apply DefaultCrop separately: LibRaw exposes it but does not enable it.
+//! Display the full ActiveArea, ignoring the recommended DefaultCrop without resampling.
 //! The source file is read-only; the uncompressed TIFF exists only in memory.
 use anyhow::{bail, ensure, Context, Result};
 use rayon::prelude::*;
+#[cfg(test)]
+mod geometry_tests;
 pub mod tiles;
 
 #[derive(Clone, Copy)]
@@ -221,14 +223,14 @@ fn active_area(tiff: &Tiff<'_>, ifd: &Ifd, raw_size: [u32; 2]) -> Result<[u32; 4
 fn default_crop(tiff: &Tiff<'_>, ifd: &Ifd, raw_size: [u32; 2]) -> Result<Option<[u32; 4]>> {
     let origin = tiff.rationals(ifd, 50719)?;
     let size = tiff.rationals(ifd, 50720)?;
-    if origin.is_empty() && size.is_empty() {
-        return Ok(None);
-    }
     let scale = tiff.rationals(ifd, 50718)?;
     ensure!(
         scale.iter().all(|v| v.n == v.d),
-        "DNG DefaultScale resampling is not supported by pixel-preserving default crop"
+        "DNG DefaultScale resampling is not supported by pixel-preserving display"
     );
+    if origin.is_empty() && size.is_empty() {
+        return Ok(None);
+    }
     let [left, top, aw, ah] = active_area(tiff, ifd, raw_size)?;
     let active_size = [aw, ah];
     let mut start = [0; 2];
@@ -257,7 +259,13 @@ fn default_crop(tiff: &Tiff<'_>, ifd: &Ifd, raw_size: [u32; 2]) -> Result<Option
     ]))
 }
 
-/// Header-only DNG geometry, including the same default crop as full decode.
+fn display_area(tiff: &Tiff<'_>, ifd: &Ifd, raw_size: [u32; 2]) -> Result<[u32; 4]> {
+    // Ignore the recommended framing, not malformed geometry or unsupported scale.
+    let _ = default_crop(tiff, ifd, raw_size)?;
+    active_area(tiff, ifd, raw_size)
+}
+
+/// Header-only DNG geometry, including the same full ActiveArea as full decode.
 /// Reads TIFF metadata only: no JXL tile, JPEG preview or sensor unpacking.
 pub fn dimensions(bytes: &[u8]) -> Result<Option<[u32; 2]>> {
     let Some(tiff) = Tiff::parse(bytes)? else {
@@ -275,18 +283,12 @@ pub fn dimensions(bytes: &[u8]) -> Result<Option<[u32; 2]>> {
     }
     let ifd = selected.context("Cannot identify DNG raw IFD for dimensions")?;
     let raw_size = [tiff.value(ifd, 256, 0)?, tiff.value(ifd, 257, 0)?];
-    let rect = default_crop(&tiff, ifd, raw_size)?;
-    // For ordinary DNGs without declared DefaultCrop, let LibRaw's header-only
-    // sizing handle camera-specific geometry, just as for NEF. JXL is not
-    // recognizable by this pin until unpacked, so its simple canvas/active
-    // rectangle is the metadata-only fallback.
-    if rect.is_none() && tiff.value(ifd, 259, 1)? != 52546 {
+    let [_, _, w, h] = display_area(&tiff, ifd, raw_size)?;
+    // Without explicit ActiveArea, ordinary DNGs may have camera-specific margins
+    // known only to LibRaw. JXL LinearRaw uses its simple canvas as the fallback.
+    if tiff.values(ifd, 50829)?.is_empty() && tiff.value(ifd, 259, 1)? != 52546 {
         return Ok(None);
     }
-    let [_, _, w, h] = match rect {
-        Some(rect) => rect,
-        None => active_area(&tiff, ifd, raw_size)?,
-    };
     // LibRaw apply_tiff uses the first non-identity TIFF orientation, including
     // IFD0 when the sensor image is a SubIFD and inherits IFD0's orientation.
     let mut rotated = false;
@@ -331,21 +333,22 @@ pub fn crop_rect(bytes: &[u8], size: [u32; 2], area: RawArea, flip: u32) -> Resu
             && tiff.value(ifd, 256, 0)? == area.raw_width
             && tiff.value(ifd, 257, 0)? == area.raw_height
         {
-            ensure!(selected.is_none(), "Ambiguous DNG raw IFD for default crop");
+            ensure!(selected.is_none(), "Ambiguous DNG raw IFD for active area");
             selected = Some(ifd);
         }
     }
-    let ifd = selected.context("Cannot map DNG raw IFD to LibRaw output for default crop")?;
-    let Some([x, y, mut w, mut h]) = default_crop(&tiff, ifd, [area.raw_width, area.raw_height])?
-    else {
-        return Ok(full);
-    };
+    let ifd = selected.context("Cannot map DNG raw IFD to LibRaw output for active area")?;
+    let mut rect = display_area(&tiff, ifd, [area.raw_width, area.raw_height])?;
+    if tiff.values(ifd, 50829)?.is_empty() && tiff.value(ifd, 259, 1)? != 52546 {
+        rect = [area.left, area.top, area.width, area.height];
+    }
+    let [x, y, mut w, mut h] = rect;
     ensure!(
         x >= area.left
             && y >= area.top
             && u64::from(x) + u64::from(w) <= u64::from(area.left) + u64::from(area.width)
             && u64::from(y) + u64::from(h) <= u64::from(area.top) + u64::from(area.height),
-        "DNG DefaultCrop is outside the LibRaw output rectangle"
+        "DNG ActiveArea is outside the LibRaw output rectangle"
     );
     let (mut x, mut y) = (x - area.left, y - area.top);
     let (mut iw, mut ih) = (area.width, area.height);
@@ -365,7 +368,7 @@ pub fn crop_rect(bytes: &[u8], size: [u32; 2], area: RawArea, flip: u32) -> Resu
     }
     ensure!(
         size == [iw, ih],
-        "LibRaw rescaled DNG output; cannot apply a pixel-preserving default crop"
+        "LibRaw rescaled DNG output; cannot preserve ActiveArea pixels"
     );
     Ok([x, y, w, h])
 }
@@ -762,7 +765,7 @@ mod tests {
         }))
     }
     #[test]
-    fn default_crop_integer_rational_active_area_and_all_orientations_preserve_rgb16() {
+    fn default_crop_is_ignored_for_all_types_endians_subifds_and_orientations() {
         for e in [Endian(true), Endian(false)] {
             for subifd in [false, true] {
                 for kind in [3, 4, 5] {
@@ -784,13 +787,13 @@ mod tests {
                             width: 14,
                             height: 17,
                         };
-                        let expected = orient(pixels(14, 17).crop_imm(2, 3, 6, 8), flip);
+                        let expected = orient(pixels(14, 17), flip);
                         let image =
                             crop(&source, orient(pixels(14, 17), flip), area, flip).unwrap();
                         assert!(matches!(image, image::DynamicImage::ImageRgb16(_)));
                         assert_eq!(image.as_rgb16(), expected.as_rgb16());
-                        // Full sensor output and already-default-cropped output
-                        // must map to the same rectangle (no double crop).
+                        // Remove only ActiveArea margins from full-sensor output;
+                        // already-active output must never be cropped twice.
                         let full = RawArea {
                             left: 0,
                             top: 0,
@@ -799,20 +802,35 @@ mod tests {
                             ..area
                         };
                         let original = pixels(17, 19);
-                        let expected = orient(original.crop_imm(4, 4, 6, 8), flip);
+                        let expected = orient(original.crop_imm(2, 1, 14, 17), flip);
                         let image = crop(&source, orient(original, flip), full, flip).unwrap();
                         assert_eq!(image.as_rgb16(), expected.as_rgb16());
                         let already = RawArea {
-                            left: 4,
-                            top: 4,
-                            width: 6,
-                            height: 8,
+                            left: 2,
+                            top: 1,
+                            width: 14,
+                            height: 17,
                             ..area
                         };
                         assert_eq!(
                             crop(&source, image, already, flip).unwrap().as_rgb16(),
                             expected.as_rgb16()
                         );
+                        // A decoder that already discarded DefaultCrop margins
+                        // cannot satisfy the full-ActiveArea display contract.
+                        assert!(crop_rect(
+                            &source,
+                            [6, 8],
+                            RawArea {
+                                left: 4,
+                                top: 4,
+                                width: 6,
+                                height: 8,
+                                ..area
+                            },
+                            flip
+                        )
+                        .is_err());
                     }
                 }
             }
@@ -838,9 +856,14 @@ mod tests {
         };
         let image = crop(&source, pixels(17, 19), area, 0).unwrap();
         assert_eq!(image.as_rgb16(), pixels(17, 19).as_rgb16());
+        let tiff = Tiff::parse(&source).unwrap().unwrap();
+        assert_eq!(
+            default_crop(&tiff, tiff.jxl_raw().unwrap().unwrap(), [17, 19]).unwrap(),
+            Some([0, 0, 17, 19])
+        );
     }
     #[test]
-    fn header_dimensions_use_crop_and_orientation_without_reading_jxl_pixels() {
+    fn header_dimensions_use_full_active_area_and_orientation_without_reading_jxl_pixels() {
         for e in [Endian(true), Endian(false)] {
             for subifd in [false, true] {
                 for kind in [3, 4, 5] {
@@ -861,7 +884,7 @@ mod tests {
                         source[start..start + 16].fill(0);
                         assert_eq!(
                             dimensions(&source).unwrap(),
-                            Some(if orientation >= 5 { [8, 6] } else { [6, 8] })
+                            Some(if orientation >= 5 { [17, 14] } else { [14, 17] })
                         );
                     }
                 }
@@ -908,14 +931,31 @@ mod tests {
             .unwrap_err()
             .to_string()
             .contains("DefaultScale"));
+        assert!(dimensions(&scaled).is_err());
+        // Scale validation also applies when the recommended crop is absent.
+        let tiff = Tiff::parse(&scaled).unwrap().unwrap();
+        let raw = tiff.jxl_raw().unwrap().unwrap();
+        let tags: Vec<_> = raw
+            .entries
+            .iter()
+            .enumerate()
+            .filter_map(|(i, entry)| {
+                matches!(e.u16(entry), 50719 | 50720).then_some(raw.offset + 2 + i * 12)
+            })
+            .collect();
+        for at in tags {
+            scaled[at..at + 2].copy_from_slice(&e.put16(65000));
+        }
+        assert!(dimensions(&scaled).is_err());
+        assert!(crop(&scaled, pixels(17, 19), area, 0).is_err());
     }
     #[test]
-    fn libraw_default_crop_matches_exact_subset_of_uncropped_rgb16_for_rotated_dng() {
+    fn libraw_full_active_area_ignores_default_crop_without_changing_any_rgb16_sample() {
         let e = Endian(true);
         let root = std::env::temp_dir().join(format!("lumen-dng-crop-test-{}", std::process::id()));
         std::fs::create_dir_all(&root).unwrap();
         let path = root.join("synthetic.dng");
-        for (orientation, flip) in [(1, 0), (6, 6), (8, 5)] {
+        for orientation in 1..=8 {
             for (kind, active) in [(4, [0, 0, 35, 33]), (5, [1, 2, 34, 32])] {
                 let source = synthetic_size(e, true, 33, 35);
                 let source = crop_fixture(
@@ -956,28 +996,18 @@ mod tests {
                 let uncropped = crate::decode::decode(&path).unwrap();
                 assert_eq!(crate::decode::dimensions(&path).unwrap(), uncropped.size());
                 std::fs::write(&path, source).unwrap();
-                let cropped = crate::decode::decode(&path).unwrap();
-                assert_eq!(crate::decode::dimensions(&path).unwrap(), cropped.size());
-                let raw = image::DynamicImage::ImageRgb16(
-                    image::ImageBuffer::from_raw(
-                        uncropped.width,
-                        uncropped.height,
-                        uncropped.rgb.clone(),
-                    )
-                    .unwrap(),
-                );
-                // Undo only the reference orientation, then crop in active axes.
-                let inverse = match flip {
-                    5 => 6,
-                    6 => 5,
-                    _ => flip,
+                let full = crate::decode::decode(&path).unwrap();
+                assert_eq!(crate::decode::dimensions(&path).unwrap(), full.size());
+                let [t, l, b, r] = active;
+                let expected = if orientation >= 5 {
+                    [b - t, r - l]
+                } else {
+                    [r - l, b - t]
                 };
-                let expected =
-                    orient(orient(raw, inverse).crop_imm(2, 3, 27, 28), flip).into_rgb16();
-                assert_eq!(cropped.size(), [expected.width(), expected.height()]);
+                assert_eq!(full.size(), expected);
                 assert!(
-                    cropped.rgb == expected.into_raw(),
-                    "RGB16 changed outside cropping: orientation={orientation}, kind={kind}"
+                    full.rgb == uncropped.rgb,
+                    "DefaultCrop changed RGB16: orientation={orientation}, kind={kind}"
                 );
             }
         }

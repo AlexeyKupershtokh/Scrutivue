@@ -117,11 +117,13 @@ checks the packaged app, creates a tag and publishes assets with
 workflow. macOS signing, DMG creation and Sparkle are not requirements for our
 Windows portable ZIP.
 
-## Recommended Scrutivue release process (proposal, not yet published)
+## Scrutivue release process
 
 Start with a manually approved **draft prerelease**, not an automatically published
 release on every push. Do not create a tag or public release without choosing a
-version and approval. No release/tag was created during this review.
+version and approval. The initial review created no release/tag; the owner later
+published 0.3.0. The explicitly approved [0.3.1 draft](release-0.3.1.md) follows
+the clean-revision local-build path below, without altering 0.3.0 or triggering CI.
 
 1. Choose an immutable version/tag that matches `Cargo.toml` and the executable's
    version resource. Build from the exact clean committed revision; never attach

@@ -1,5 +1,11 @@
 # Separate experimental libjxl-parallel executable
 
+**Historical experiment:** promoted to the normal executable's default features
+in [0.3.1](release-0.3.1.md). For a runner-only comparison today, use
+`--no-default-features --features experimental-jxl-parallel --bin scrutivue-jxl-parallel`.
+The opt-in/default-disabled descriptions and cropped-DNG measurements below refer
+to the preserved 0.3.0 experiment, not current defaults or current DNG geometry.
+
 The normal `scrutivue.exe` and the 0.3.0 draft release are unchanged. The opt-in
 `experimental-jxl-parallel` Cargo feature enables a second local executable:
 

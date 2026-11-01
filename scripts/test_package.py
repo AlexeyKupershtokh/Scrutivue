@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import sys
 import tempfile
+import tomllib
 import zipfile
 from ci_smoke import png
 
@@ -46,6 +47,12 @@ with zipfile.ZipFile(archive) as bundle:
     for name, expected in pin["licenses"].items():
         assert hashlib.sha256(bundle.read("Scrutivue/libjxl/licenses/" + name)).hexdigest() == expected, name
     assert bundle.read("Scrutivue/onnxruntime.dll") == (ROOT / "target/release/onnxruntime.dll").read_bytes()
+    if "Scrutivue/build-info/release.json" in bundle.namelist():
+        provenance = json.loads(bundle.read("Scrutivue/build-info/release.json"))
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+        assert provenance["version"] == version
+        assert provenance["executable"]["sha256"] == hashlib.sha256(bundle.read("Scrutivue/scrutivue.exe")).hexdigest()
+        assert len(provenance["source_commit"]) == 40 and provenance["source_clean"]
     inventory = json.loads(bundle.read("Scrutivue/LICENSES/rust-dependencies.json"))
     assert inventory and all(p["notice_files"] or p.get("supplemental_notice_files") for p in inventory)
     with tempfile.TemporaryDirectory(prefix="package-test-", dir=ROOT / "target") as temporary:

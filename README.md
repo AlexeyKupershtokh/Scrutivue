@@ -21,7 +21,7 @@ A desktop application for comparing photographs and RAW images. **Rust · GPUI /
 - **High pass filter** with a radius control at the top. Cached difference filtering reduces moiré when zoomed out.
 - **Color picker** (`C`): an unsmoothed 1600% original-pixel loupe; A/B colors in RGB8/16, HEX, HSL, HSV, OKLCH and Lab/XYZ D65.
 - **Statistics** (`S`): progressive results for PSNR, SSIM, MS-SSIM, SSIMULACRA2, GMSD, LPIPS, MAE/RMSE and three separate A/B noise estimates. In-memory LFU caches hold 100 pairs and 20 intermediate resized copies. Completed live-frame hits do not reread files, hash pixels or recompute stages. Streaming resizes and released ONNX activation buffers reduce temporary/retained memory; [measurements and remaining costs](docs/statistics-performance.md). LPIPS uses ONNX + `ort`, without Python.
-- JPEG XL DNG 1.7 (RGB/grey16) is decompressed before LibRaw development. DNG DefaultCrop and JPEG orientation are respected without stretching. [DNG/JPEG dimensions](docs/dng.md), [pair loading/cache measurements](docs/loading-performance.md); source files are never changed.
+- JPEG XL DNG 1.7 (RGB/grey16) is decompressed before LibRaw development. DNG shows the full ActiveArea, ignoring the recommended DefaultCrop; JPEG keeps its stored dimensions and EXIF orientation. No stretching or source changes. [DNG/JPEG dimensions](docs/dng.md), [historical pair loading/cache measurements](docs/loading-performance.md).
 - Ordinary JPEG loading fuses EXIF orientation and RGB16 conversion in the bounded background decode pool, without changing the JPEG codec or final samples. [JPEG timings and remaining serial work](docs/jpeg-loading-performance.md).
 - Supported Nikon HE NEFs use parallel full-width stripes and exact LibRaw development/output adapters in the same bounded background pool. The pinned decoder and final RGB16 samples are preserved. [NEF scope, safeguards and timings](docs/nef-loading-performance.md).
 - Supported LinearRaw RGB16 JXL DNGs load both sides simultaneously: Slider starts at the divider and expands left/right; Diff starts at the center and displays differences wherever both tiles are ready. Tiles are reused while panning and returning to recent unfinished images, then completed during idle time. Bundled native decoding can provide an early coarse stage outside Diff. Eligible sources assemble the final RGB16 frame directly from developed tiles without another full LibRaw pass; high-pass and exact tools still wait for a complete, validated frame. [Runtime setup, completion safeguards and progressive test copies](docs/dng-streaming.md).
@@ -42,6 +42,8 @@ cargo run --release -- "D:\Photos\A.NEF" "D:\Photos\B.NEF"
 ```
 
 The Windows binary is `target/release/scrutivue.exe`; **keep its matching `onnxruntime.dll`, `models/` and the complete `libjxl/` subdirectory beside it**. Cargo copies the pinned LPIPS model to `models/lpips-squeeze-v0.1.onnx`; the weights are not embedded in the EXE. Python and 7-Zip are only needed for preparation/validation scripts, not the application. OpenCL is not required. The icon remains embedded. The Microsoft Visual C++ x64 runtime may be required on a clean Windows installation.
+
+Since **0.3.1**, the normal executable enables the validated parallel JXL runner and Single-image scheduling by default, alongside JPEG and supported Nikon HE optimizations. Comparison-only builds can use `--no-default-features`; build `--bin scrutivue` to avoid rebuilding the preserved experimental targets. [0.3.1 release notes](docs/release-0.3.1.md).
 
 ## Windows builds on GitHub
 

@@ -1,5 +1,8 @@
 # DNG/JPEG XL decoder experiments
 
+Historical decoder comparison using the pre-0.3.1 DefaultCrop policy. Current
+DNG displays full ActiveArea; see [geometry](dng.md) and [0.3.1](release-0.3.1.md).
+
 Measured on 2026-11-01, Windows x64, AMD Ryzen 5 5600 (6 cores / 12 logical CPUs).
 Standalone optimized developer harnesses only: no UI/GPU presentation, production
 decoder substitution, application binary replacement or source-image changes.

@@ -6,6 +6,7 @@ from pathlib import Path
 import shutil
 import subprocess
 import tempfile
+import tomllib
 import zipfile
 from prepare_jxl_runtime import load_pin, validate_bundle
 
@@ -106,6 +107,7 @@ def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, default=ROOT / "target/release/scrutivue.exe")
     parser.add_argument("--output", type=Path, default=ROOT / "target/dist/Scrutivue-windows-x64.zip")
+    parser.add_argument("--provenance", type=Path, help="Verified release JSON to include as build-info/release.json")
     args = parser.parse_args()
     exe = args.exe.resolve(strict=True)
     runtime = exe.with_name("onnxruntime.dll")
@@ -113,6 +115,13 @@ def main():
         raise SystemExit("Matching onnxruntime.dll must be beside scrutivue.exe")
     archive = args.output.resolve()
     archive.parent.mkdir(parents=True, exist_ok=True)
+    if args.provenance:
+        provenance = json.loads(args.provenance.read_text(encoding="utf-8"))
+        version = tomllib.loads((ROOT / "Cargo.toml").read_text(encoding="utf-8"))["package"]["version"]
+        revision = subprocess.check_output(["git", "rev-parse", "HEAD"], cwd=ROOT, text=True).strip()
+        if (provenance["version"] != version or provenance["source_commit"] != revision
+                or provenance["executable"]["sha256"] != hashlib.sha256(exe.read_bytes()).hexdigest()):
+            raise SystemExit("Release provenance does not match this executable, version and source revision")
     with tempfile.TemporaryDirectory(prefix="package-", dir=ROOT / "target") as temporary:
         bundle = Path(temporary) / "Scrutivue"
         copy_file(exe, bundle / "scrutivue.exe")
@@ -128,6 +137,8 @@ def main():
         copy_file(ROOT / "assets/models/lpips-squeeze-v0.1.json", bundle / "build-info/lpips-squeeze-v0.1.json")
         for name in ("parallel_raw.cpp", "parallel_raw.h"):
             copy_file(ROOT / "native" / name, bundle / "build-info/native" / name)
+        if args.provenance:
+            copy_file(args.provenance, bundle / "build-info/release.json")
         rust_notices(bundle / "LICENSES")
         (bundle / "README.txt").write_text(
             "Scrutivue — photograph and RAW comparison\n\n"

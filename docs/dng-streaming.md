@@ -101,10 +101,11 @@ loading the other source instead of decoding the completed side again. Completed
 inactive frames are not additionally pinned by the partial-source LRU; the existing
 full-frame cache has its own six-entry / 1 GiB policy.
 
-The separate, opt-in [third single-source experiment](single-parallel-experiment.md)
+Since 0.3.1, the validated [single-source optimization](single-parallel-experiment.md)
 parallelizes Single preview rows, keeps only the first progressive coarse start
 before batching, and allows a larger bounded worker budget only for a single
-selected source. The normal and second executables keep the policy above.
+selected source. It and the parallel JXL runner are enabled in the normal executable
+by default. `--no-default-features` retains the earlier comparison policy.
 
 ## Guarded completion from developed tiles
 
@@ -118,8 +119,9 @@ identity input curve, zero black corrections, fixed valid camera white balance,
 matching color matrices/multipliers/white samples/gamma and the same RGB conversion
 policy. Spatial zero repair, mixing, denoise, aberration, exposure and highlight
 processing cannot participate. Active margins, stretching and ambiguous orientation
-also reject the fast completion; normal DefaultCrop and all eight TIFF orientations
-are supported by final assembly and tested against the legacy output.
+also reject the fast completion. Since 0.3.1, final assembly uses the full ActiveArea,
+ignores the recommended DefaultCrop and supports all eight TIFF orientations.
+It is tested against fresh full development with the same display policy.
 
 At completion, every tile must have final raw samples and a correctly sized
 developed RGB16 frame. The actual whole-image maximum is computed over real raw

@@ -122,7 +122,7 @@ fn header_qualification_is_lazy_and_can_be_warmed_after_the_first_snapshot() {
 }
 
 #[test]
-fn certified_tiles_match_every_legacy_rgb16_sample_for_endian_crop_and_orientation() {
+fn certified_tiles_ignore_default_crop_and_match_full_active_rgb16_for_all_orientations() {
     for little in [true, false] {
         for orientation in 1..=8 {
             let mut source = calibrated(
@@ -135,6 +135,8 @@ fn certified_tiles_match_every_legacy_rgb16_sample_for_endian_crop_and_orientati
             assert_eq!(source.completion_white(), Some(65535));
             populate(&mut source, 65535, false);
             let legacy = source.finish_reference(&|| false).unwrap();
+            let expected_size = if orientation >= 5 { [49, 65] } else { [65, 49] };
+            assert_eq!(source.size, expected_size);
             let (frame, timings) = source.finish_profiled(&|| false).unwrap();
             assert_eq!(timings.path, "developed-tiles");
             assert_eq!(timings.development_ms, 0.);
@@ -144,8 +146,12 @@ fn certified_tiles_match_every_legacy_rgb16_sample_for_endian_crop_and_orientati
                 "orientation {orientation}, little {little}"
             );
             source = with_tags(source, &[(50719, vec![3, 5]), (50720, vec![57, 39])]);
+            assert_eq!(source.crop, [0, 0, 65, 49]);
+            assert_eq!(source.size, expected_size);
             populate(&mut source, 65535, false);
-            let legacy = source.finish_reference(&|| false).unwrap();
+            let with_crop = source.finish_reference(&|| false).unwrap();
+            assert_eq!(with_crop.size(), legacy.size());
+            assert_eq!(with_crop.rgb, legacy.rgb);
             let (joined, timings) = source.finish_profiled(&|| false).unwrap();
             assert_eq!(timings.path, "developed-tiles");
             assert_eq!(joined.size(), legacy.size());
@@ -155,6 +161,45 @@ fn certified_tiles_match_every_legacy_rgb16_sample_for_endian_crop_and_orientati
             assert!(source
                 .join_developed(&|| visits.fetch_add(1, std::sync::atomic::Ordering::Relaxed) > 2)
                 .is_err());
+        }
+    }
+}
+
+#[test]
+fn active_margins_are_retained_in_stream_coordinates_and_full_completion() {
+    for little in [true, false] {
+        for orientation in 1..=8 {
+            let source = calibrated(
+                &format!("active-geometry-{little}-{orientation}"),
+                little,
+                orientation,
+                true,
+                0,
+            );
+            let mut source = with_tags(
+                source,
+                &[
+                    (50829, vec![1, 1, 48, 64]),
+                    (50719, vec![3, 5]),
+                    (50720, vec![57, 39]),
+                ],
+            );
+            assert_eq!(source.crop, [1, 1, 63, 47]);
+            let expected = if orientation >= 5 { [47, 63] } else { [63, 47] };
+            assert_eq!(source.size, expected);
+            assert_eq!(dimensions(&source.map).unwrap(), Some(expected));
+            for y in 0..expected[1] {
+                for x in 0..expected[0] {
+                    let [rx, ry] = source.raw_point(x, y);
+                    assert!((1..64).contains(&rx) && (1..48).contains(&ry));
+                }
+            }
+            populate(&mut source, 65535, false);
+            let reference = source.finish_reference(&|| false).unwrap();
+            let (frame, timings) = source.finish_profiled(&|| false).unwrap();
+            assert_eq!(timings.path, "full-libraw");
+            assert_eq!(frame.size(), expected);
+            assert_eq!(frame.rgb, reference.rgb);
         }
     }
 }

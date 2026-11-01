@@ -1,4 +1,63 @@
-# DNG: DefaultCrop и размеры кадра
+# DNG geometry: full ActiveArea
+
+## Current policy (0.3.1)
+
+Scrutivue displays the **full DNG ActiveArea**, ignoring the recommended
+`DefaultCropOrigin` / `DefaultCropSize`. It does not resample or alter source
+photographs. Sensor margins outside ActiveArea remain excluded; this is not an
+option to expose optical-black pixels. Ordinary DNGs without explicit ActiveArea
+retain LibRaw's camera-specific output geometry; JXL LinearRaw falls back to its
+stored canvas.
+
+The six requested Nikon Z8 NEFs and 36 corresponding DNGs store **8280x5520**
+pixels. Each DNG has `ActiveArea=(0,0,5520,8280)` and recommends the same framing
+as Nikon's NEF `CropArea`: `(x=12,y=8,width=8256,height=5504)`. With orientation 8,
+both NEF and DNG now display **5520x8280**. The JPEG exports physically contain
+only 8256x5504 pixels and remain **5504x8256** after EXIF orientation.
+
+The prior 0.3.0 DNG output is the exact rectangle
+`(x=8,y=12,width=5504,height=8256)` inside the new oriented full frame. Only the
+previously hidden border is exposed; overlapping RGB16 values are unchanged.
+Equal dimensions do not imply equal NEF/DNG processing or equal color samples.
+Pair statistics still reject unequal dimensions rather than stretching JPEGs.
+
+### Consistency and safeguards
+
+- Metadata sizing, streamed tile coordinates, direct developed-tile completion
+  and full LibRaw development all select the same ActiveArea and orientation.
+- The pinned Redlamp LibRaw fork, development parameters and JPEG XL transport
+  remain unchanged. Camera WB, color conversion and orientation still use LibRaw.
+- DefaultCrop metadata remains in the in-memory full-image transport, but is
+  validated rather than applied. Invalid coordinates, zero denominators and
+  non-unit DefaultScale are not silently accepted. Scale is checked even without
+  DefaultCrop; no hidden resizing is introduced.
+- Mapping accounts for ActiveArea margins already removed by LibRaw. All eight
+  orientations, including reflections, are supported without a second crop or
+  rotation. Output that cannot contain the requested ActiveArea fails explicitly.
+- Embedded previews may already be cropped or reduced; they are not authoritative
+  full-resolution geometry or analysis data.
+
+### Validation
+
+Synthetic coverage includes SHORT/LONG/RATIONAL DefaultCrop, both TIFF
+endiannesses, raw SubIFDs, nonzero ActiveArea margins, every orientation, corrupt
+metadata and rescaled output. Header-only tests still work with damaged JXL pixel
+data. Native integration compares the complete RGB16 frame with the same DNG
+whose DefaultCrop tags are absent. Streamed completion is compared to fresh full
+development, both with and without active margins.
+
+The read-only actual-corpus regression compares all 36 newly exposed full frames
+against the preserved prior application's cropped hashes and sums. Its optional
+test is `full_active_area_preserves_every_previous_default_crop_sample`, taking
+`SCRUTIVUE_DNG_GEOMETRY_BASELINE` and a fresh `SCRUTIVUE_DNG_GEOMETRY_OUTPUT`.
+Release validation and artifact provenance are recorded under
+`target/release-0.3.1/`; see [0.3.1 notes](release-0.3.1.md).
+
+## Historical DefaultCrop implementation (0.3.0; superseded)
+
+The notes below document the earlier intentional crop and its measurements.
+Their cropped dimensions, hashes, timings and rules are historical, not the
+0.3.1 display policy.
 
 Полный DNG декодируется в RGB16 закреплённым Redlamp LibRaw
 `f4956c404fba0c6035ce9e06353d4b4ffe068fc7`; замены форка нет. JPEG XL

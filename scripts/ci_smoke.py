@@ -28,7 +28,7 @@ def png(path):
 def dng(path, calibrated=False):
     """Small, generated LinearRaw fixture using the repository's lossless JXL tile."""
     tile = (ROOT / "assets/tests/dng-jxl-tile.jxl").read_bytes()
-    count, tiles = 14 + (2 if calibrated else 0), 16
+    count, tiles = 17 + (2 if calibrated else 0), 16
     data = bytearray(b"II*\0" + struct.pack("<I", 8) + bytes(2 + count * 12 + 4))
     bits = len(data)
     data.extend(struct.pack("<HHH", 16, 16, 16))
@@ -41,6 +41,10 @@ def dng(path, calibrated=False):
     neutral = len(data)
     if calibrated:
         data.extend(struct.pack("<IIIIII", 1, 1, 1, 1, 1, 1))
+    crop_origin = len(data)
+    data.extend(struct.pack("<II", 3, 5))
+    crop_size = len(data)
+    data.extend(struct.pack("<II", 57, 53))
     for index in range(tiles):
         struct.pack_into("<I", data, offsets + index * 4, len(data))
         struct.pack_into("<I", data, lengths + index * 4, len(tile))
@@ -49,7 +53,8 @@ def dng(path, calibrated=False):
         (258, 3, 3, bits), (259, 3, 1, 52546), (262, 3, 1, 34892),
         (277, 3, 1, 3), (284, 3, 1, 1), (322, 4, 1, 16), (323, 4, 1, 16),
         (324, 4, tiles, offsets), (325, 4, tiles, lengths),
-        (50706, 1, 4, 0x701), (50708, 2, 9, camera)]
+        (50706, 1, 4, 0x701), (50708, 2, 9, camera),
+        (274, 3, 1, 8), (50719, 4, 2, crop_origin), (50720, 4, 2, crop_size)]
     if calibrated:
         # The lossless asset's independent generator is documented in dng.rs.
         # Make its actual peak equal the declared white, so no global rescale is needed.
@@ -82,6 +87,7 @@ def main():
                 check=True, capture_output=True, text=True, encoding="utf-8", timeout=30)
             native = json.loads(probe.stdout)
             assert native["success"] and native["native_runtime"], native
+            assert native["size"] == [64, 64] and native["legacy_compared_samples"] == 64 * 64 * 3, native
             assert native["matches_fresh_full_decode"] and native["source_unchanged"], native
             assert native["matches_legacy_full_development"] and native["legacy_differing_samples"] == 0, native
             assert native["completion"]["path"] == ("developed-tiles" if calibrated else "full-libraw"), native

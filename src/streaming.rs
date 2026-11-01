@@ -348,7 +348,7 @@ fn priority_tiles(
             .then_with(|| a.0.cmp(&b.0))
     });
     let mut indices: Vec<_> = ranked.into_iter().map(|r| r.0).collect();
-    // Physically present tiles outside DefaultCrop still belong to exact full
+    // Physically present tiles outside ActiveArea still belong to exact full
     // reconstruction, but must never preempt any displayable tile.
     if !visible {
         indices.extend((0..source.tiles.len()).filter(|&i| source.display_bounds(i).is_none()));

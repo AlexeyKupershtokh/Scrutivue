@@ -107,8 +107,7 @@ impl Source {
         let progressive_hint = header
             .frame_header(0)
             .is_some_and(|h| h.passes.num_passes > 1);
-        let crop =
-            default_crop(&tiff, ifd, raw_size)?.unwrap_or(active_area(&tiff, ifd, raw_size)?);
+        let crop = display_area(&tiff, ifd, raw_size)?;
         let mut orientation = 1;
         for entry in &tiff.ifds {
             let value = tiff.value(entry, 274, 1)?;

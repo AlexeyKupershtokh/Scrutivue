@@ -1,5 +1,11 @@
 # Third experimental executable: single-source parallel loading
 
+**Historical experiment:** its validated cumulative features are enabled in the
+normal `scrutivue.exe` by default since [0.3.1](release-0.3.1.md). Use
+`cargo build --release --locked --bin scrutivue` for the release application.
+The separate-executable descriptions and cropped-DNG timings below describe the
+preserved 0.3.0 experiment, not the 0.3.1 package.
+
 Build only the separate opt-in target:
 
 ```powershell

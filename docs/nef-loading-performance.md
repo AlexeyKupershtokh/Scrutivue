@@ -1,5 +1,9 @@
 # Nikon HE NEF: parallel stripes and exact full-frame development
 
+The measurements and saved binaries below predate 0.3.1. The optimization is now
+in the normal executable; [0.3.1](release-0.3.1.md) also promotes the cumulative
+DNG features and changes DNG display to full ActiveArea. NEF geometry is unchanged.
+
 ## Scope and diagnosis
 
 The requested directory, `E:/Documents/AI/corpus/3 этаж single/3 этаж single`,
