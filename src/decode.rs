@@ -50,6 +50,15 @@ unsafe extern "C" {
         cancelled: extern "C" fn(*mut c_void) -> i32,
         context: *mut c_void,
     ) -> i32;
+    fn diff_raw_open_region_cancellable(
+        bytes: *const c_void,
+        length: usize,
+        out: *mut RawView,
+        error: *mut c_char,
+        capacity: usize,
+        cancelled: extern "C" fn(*mut c_void) -> i32,
+        context: *mut c_void,
+    ) -> i32;
     fn diff_raw_close(owner: *mut c_void);
     fn libraw_init(flags: u32) -> *mut c_void;
     fn libraw_open_buffer(raw: *mut c_void, bytes: *const c_void, length: usize) -> i32;
@@ -285,11 +294,103 @@ pub fn decode(path: &Path) -> Result<Arc<Frame>> {
     decode_cancellable(path, &|| false)
 }
 
+/// Develop an in-memory, uncompressed DNG on the caller's background worker.
+/// Authoritative whole-frame completion retains the pinned production settings.
+pub fn develop_dng_bytes(
+    bytes: &[u8],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Arc<Frame>> {
+    develop_dng_bytes_with_policy(bytes, false, cancelled)
+}
+
+/// Preview regions must share the metadata white level, not independently
+/// normalize brightness to the brightest sample of each tile.
+pub fn develop_dng_region_bytes(
+    bytes: &[u8],
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Arc<Frame>> {
+    develop_dng_bytes_with_policy(bytes, true, cancelled)
+}
+
+fn develop_dng_bytes_with_policy(
+    bytes: &[u8],
+    region: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+) -> Result<Arc<Frame>> {
+    anyhow::ensure!(!cancelled(), "Image decode cancelled");
+    let mut view = RawView::default();
+    let mut error = [0i8; 512];
+    let mut cancellation = Cancellation(cancelled);
+    let status = unsafe {
+        if region {
+            diff_raw_open_region_cancellable(
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                &mut view,
+                error.as_mut_ptr(),
+                error.len(),
+                check_cancel,
+                (&mut cancellation as *mut Cancellation<'_>).cast(),
+            )
+        } else {
+            diff_raw_open_cancellable(
+                bytes.as_ptr().cast(),
+                bytes.len(),
+                0,
+                &mut view,
+                error.as_mut_ptr(),
+                error.len(),
+                check_cancel,
+                (&mut cancellation as *mut Cancellation<'_>).cast(),
+            )
+        }
+    };
+    if status != 0 {
+        bail!(
+            "LibRaw: {}",
+            unsafe { CStr::from_ptr(error.as_ptr()) }.to_string_lossy()
+        );
+    }
+    anyhow::ensure!(
+        !cancelled() && !view.data.is_null() && view.bits == 16 && view.colors == 3,
+        "Invalid or cancelled DNG development"
+    );
+    let [x, y, width, height] =
+        crate::dng::crop_rect(bytes, [view.width, view.height], view.area, view.flip)?;
+    let data = unsafe { std::slice::from_raw_parts(view.data, view.length as usize) };
+    anyhow::ensure!(
+        data.len() == view.width as usize * view.height as usize * 6,
+        "Invalid DNG bitmap length"
+    );
+    let mut rgb = Vec::with_capacity(width as usize * height as usize * 3);
+    for row in 0..height as usize {
+        let start = ((y as usize + row) * view.width as usize + x as usize) * 6;
+        for value in data[start..start + width as usize * 6].chunks_exact(2) {
+            rgb.push(u16::from_ne_bytes([value[0], value[1]]));
+        }
+    }
+    Ok(Arc::new(Frame { width, height, rgb }))
+}
+
 pub fn decode_cancellable(
     path: &Path,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<Arc<Frame>> {
     anyhow::ensure!(!cancelled(), "Image decode cancelled");
+    if path
+        .extension()
+        .is_some_and(|e| e.eq_ignore_ascii_case("dng"))
+    {
+        if let Ok(library) = crate::jxl::Library::installed() {
+            if let Ok(source) = crate::dng::tiles::Source::open(path) {
+                match source.decode_full_native(library, cancelled) {
+                    Ok(frame) => return Ok(frame),
+                    Err(error) if cancelled() => return Err(error),
+                    Err(_) => {} // Unsupported native profiles retain the existing oxide fallback.
+                }
+            }
+        }
+    }
     let image = if crate::model::is_raw(path) {
         raw_cancellable(path, false, cancelled)?
     } else {

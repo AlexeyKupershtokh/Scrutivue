@@ -5,6 +5,7 @@ mod dng;
 mod file_actions;
 mod gpu;
 mod help;
+mod jxl;
 mod lfu;
 mod metrics;
 mod minimap;
@@ -14,6 +15,7 @@ mod platform;
 mod preferences;
 mod processing;
 mod services;
+mod streaming;
 mod ui;
 
 extern crate libz_sys;
@@ -50,6 +52,15 @@ struct Args {
     /// Decode each path and its thumbnail, printing diagnostics without a window.
     #[arg(long)]
     probe: bool,
+    /// Exercise visible DNG tiles, pan reuse and exact idle completion without a window.
+    #[arg(long)]
+    stream_probe: bool,
+    /// Validate paired tile loading and preview composition without a window.
+    #[arg(long, value_parser = ["slider", "diff", "slider-fit", "diff-fit"])]
+    stream_pair_probe: Option<String>,
+    /// Save paired-probe preview buffers in a new directory (never overwrite).
+    #[arg(long, requires = "stream_pair_probe")]
+    stream_probe_output: Option<PathBuf>,
     /// Print full-frame pixel errors and perceptual metrics for two paths as JSON.
     #[arg(long)]
     statistics: bool,
@@ -60,6 +71,44 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    if let Some(mode) = &args.stream_pair_probe {
+        let result = (|| -> anyhow::Result<_> {
+            anyhow::ensure!(
+                args.paths.len() == 2,
+                "A paired streaming probe requires exactly two input files"
+            );
+            streaming::probe_pair(
+                [args.paths[0].clone(), args.paths[1].clone()],
+                if mode.starts_with("diff") {
+                    model::Mode::Diff
+                } else {
+                    model::Mode::Slider
+                },
+                mode.ends_with("-fit"),
+                args.stream_probe_output.as_deref(),
+            )
+        })();
+        match result {
+            Ok(report) => println!("{report}"),
+            Err(error) => {
+                eprintln!("Paired DNG streaming probe failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
+    if args.stream_probe {
+        for path in &args.paths {
+            match streaming::probe(path) {
+                Ok(report) => println!("{}", report),
+                Err(error) => {
+                    eprintln!("DNG streaming probe failed: {error:#}");
+                    std::process::exit(1);
+                }
+            }
+        }
+        return;
+    }
     if args.statistics {
         let result = (|| -> anyhow::Result<()> {
             anyhow::ensure!(

@@ -257,6 +257,52 @@ impl DecodeCache {
             counters: DecodeCounters::default(),
         }
     }
+    fn lookup(&self, path: &Path) -> Option<Arc<Frame>> {
+        let key = SourceKey::read(path).ok()?;
+        key.modified?;
+        let frame = self.frames.lock().unwrap().get(&key).cloned()?;
+        if SourceKey::read(path).ok()? != key {
+            return None;
+        }
+        self.counters.hits.fetch_add(1, Ordering::Relaxed);
+        Some(frame)
+    }
+    fn remember(&self, path: &Path, expected: &PhotoMetadata, frame: Arc<Frame>) {
+        let Ok(key) = SourceKey::read(path) else {
+            return;
+        };
+        if key.modified.is_none()
+            || key.bytes != expected.bytes
+            || key.modified != expected.modified
+            || key.created != expected.created
+        {
+            return;
+        }
+        let mut evicted = Vec::new();
+        let mut cache = self.frames.lock().unwrap();
+        let obsolete: Vec<_> = cache
+            .iter()
+            .filter(|(old, _)| old.path == key.path && **old != key)
+            .map(|(old, _)| old.clone())
+            .collect();
+        for old in obsolete {
+            if let Some(frame) = cache.pop(&old) {
+                evicted.push(frame);
+                self.counters.invalidations.fetch_add(1, Ordering::Relaxed);
+            }
+        }
+        if let Some((_, old)) = cache.push(key, frame) {
+            evicted.push(old);
+        }
+        Self::trim(
+            &mut cache,
+            &self.protected.lock().unwrap(),
+            1024 * 1024 * 1024,
+            &mut evicted,
+        );
+        drop(cache);
+        drop(evicted);
+    }
     fn load(
         &self,
         path: &Path,
@@ -378,6 +424,8 @@ enum Garbage {
     Frames(Vec<Arc<Frame>>),
     Images(Vec<Arc<RenderImage>>),
     Event(Event),
+    CacheFrame(PathBuf, PhotoMetadata, Arc<Frame>),
+    LookupFrame(u64, PhotoId, PathBuf),
 }
 
 #[derive(Debug, Clone)]
@@ -639,6 +687,9 @@ impl Services {
         let decode_jobs = Arc::new((Mutex::new(DecodeQueue::default()), Condvar::new()));
         let cache = Arc::new(DecodeCache::new());
         let (retire, garbage) = unbounded();
+        let retiring_cache = cache.clone();
+        let cache_events = sender.clone();
+        let cache_epoch = epoch.clone();
         thread::Builder::new()
             .name("image-release".into())
             .spawn(move || {
@@ -647,6 +698,19 @@ impl Services {
                         Garbage::Frames(frames) => drop(frames),
                         Garbage::Images(images) => drop(images),
                         Garbage::Event(event) => drop(event),
+                        Garbage::CacheFrame(path, metadata, frame) => {
+                            retiring_cache.remember(&path, &metadata, frame)
+                        }
+                        Garbage::LookupFrame(epoch, id, path) => {
+                            if cache_epoch.load(Ordering::Acquire) == epoch {
+                                if let Some(frame) = retiring_cache.lookup(&path) {
+                                    let _ = cache_events.send(Event::Decoded {
+                                        id,
+                                        result: Ok(frame),
+                                    });
+                                }
+                            }
+                        }
                     }
                 }
             })
@@ -791,6 +855,14 @@ impl Services {
         if !frames.is_empty() {
             let _ = self.retire.send(Garbage::Frames(frames));
         }
+    }
+    pub fn remember_frame(&self, path: PathBuf, metadata: PhotoMetadata, frame: Arc<Frame>) {
+        let _ = self.retire.send(Garbage::CacheFrame(path, metadata, frame));
+    }
+    pub fn lookup_frame(&self, id: PhotoId, path: PathBuf) {
+        let _ = self
+            .retire
+            .send(Garbage::LookupFrame(self.epoch(), id, path));
     }
     pub fn retire_images(&self, images: Vec<Arc<RenderImage>>) {
         if !images.is_empty() {
@@ -1349,6 +1421,30 @@ mod tests {
         assert_eq!(queue.complete(&source, &cancel).unwrap().ids, [91]);
         assert_eq!(cache.counters.decodes.load(Ordering::Relaxed), 1);
         assert_eq!(cache.counters.hits.load(Ordering::Relaxed), 1);
+    }
+    #[test]
+    fn completed_streamed_frames_reuse_the_revision_cache_but_changed_sources_do_not() {
+        let path = cache_source("stream-completed.png");
+        let cache = DecodeCache::new();
+        let frame = decode::decode(&path).unwrap();
+        let metadata = photo_metadata(&path).unwrap();
+        assert!(cache.lookup(&path).is_none());
+        cache.remember(&path, &metadata, frame.clone());
+        assert!(Arc::ptr_eq(&frame, &cache.lookup(&path).unwrap()));
+        let full = cache
+            .load(&path, &|| false, |_| {
+                panic!("a completed streamed frame must not decode again")
+            })
+            .unwrap();
+        assert!(Arc::ptr_eq(&frame, &full));
+        image::RgbImage::new(9, 7).save(&path).unwrap();
+        assert!(cache.lookup(&path).is_none());
+        cache.remember(&path, &metadata, frame);
+        assert!(cache.lookup(&path).is_none());
+        let new = decode::decode(&path).unwrap();
+        cache.remember(&path, &photo_metadata(&path).unwrap(), new.clone());
+        assert!(Arc::ptr_eq(&new, &cache.lookup(&path).unwrap()));
+        assert_eq!(cache.frames.lock().unwrap().len(), 1);
     }
     #[test]
     fn changed_size_mtime_and_created_are_distinct_cache_revisions() {

@@ -16,6 +16,21 @@ def copy_file(source, destination):
     shutil.copyfile(source, destination)
 
 
+def optional_jxl_runtime(exe, bundle):
+    source = exe.parent / "libjxl"
+    if not source.exists():
+        return
+    pin = json.loads((ROOT / "config/libjxl.json").read_text())
+    for name, expected in pin["files"].items():
+        path = source / name
+        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
+            raise SystemExit(f"Optional libjxl runtime checksum mismatch: {name}")
+        copy_file(path, bundle / "libjxl" / name)
+    if not (source / "licenses").is_dir():
+        raise SystemExit("Optional libjxl runtime is missing its upstream notices")
+    shutil.copytree(source / "licenses", bundle / "libjxl/licenses")
+
+
 def rust_notices(destination):
     """Keep each published crate's metadata and supplied license/notice files."""
     supplemental_root = ROOT / "LICENSES/Rust-supplemental"
@@ -92,17 +107,19 @@ def main():
         bundle = Path(temporary) / "Scrutivue"
         copy_file(exe, bundle / "scrutivue.exe")
         copy_file(runtime, bundle / "onnxruntime.dll")
+        optional_jxl_runtime(exe, bundle)
         copy_file(ROOT / "LICENSE", bundle / "LICENSE")
         shutil.copytree(ROOT / "LICENSES", bundle / "LICENSES")
         for name in ("LICENSE", "ThirdPartyNotices.txt"):
             copy_file(ROOT / "vendor/onnxruntime" / name, bundle / "LICENSES/ONNXRuntime" / name)
-        for pin in ("libraw.json", "onnxruntime.json"):
+        for pin in ("libraw.json", "onnxruntime.json", "libjxl.json"):
             copy_file(ROOT / "config" / pin, bundle / "build-info" / pin)
         copy_file(ROOT / "assets/models/lpips-squeeze-v0.1.json", bundle / "build-info/lpips-squeeze-v0.1.json")
         rust_notices(bundle / "LICENSES")
         (bundle / "README.txt").write_text(
             "Scrutivue — photograph and RAW comparison\n\n"
             "Extract this entire folder, then run scrutivue.exe. Keep onnxruntime.dll beside it.\n"
+            "If included, keep the libjxl subdirectory for native progressive DNG loading.\n"
             "Use Help / F1 for controls. Comparison runs offline; source images are never changed.\n"
             "Source and build instructions: https://github.com/AlexeyKupershtokh/Scrutivue\n"
             "Native runtime and published Rust dependency notices are under LICENSES.\n"

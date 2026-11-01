@@ -22,6 +22,7 @@ parser.add_argument("--readme-screenshot", type=Path)
 parser.add_argument("--statistics", action="store_true")
 parser.add_argument("--picker", action="store_true")
 parser.add_argument("--no-capture", action="store_true", help="Run native input/restart assertions when desktop capture is unavailable")
+parser.add_argument("--streaming", action="store_true", help="Exercise paired mode/divider changes immediately after startup, before the normal warm-view checks")
 args = parser.parse_args()
 output = Path(args.output)
 output.mkdir(parents=True, exist_ok=True)
@@ -84,11 +85,6 @@ def probe():
     if not user.SendMessageTimeoutW(hwnd, 0, 0, 0, 2, 100, c.byref(result)):
         timeouts += 1
     times.append((time.perf_counter() - started) * 1000)
-start = time.monotonic()
-while time.monotonic() - start < args.seconds:
-    probe()
-    time.sleep(0.05)
-
 capture_fallbacks = 0
 def capture_window(handle):
     global capture_fallbacks
@@ -228,6 +224,58 @@ user.GetWindowTextW(hwnd, title, len(title))
 assert "Scrutivue" in title.value, title.value
 first_row_y, second_row_y = 266, 348
 
+early_streaming = None
+if args.streaming:
+    # Do this before the normal responsiveness wait: with large tiled DNGs,
+    # selecting B now exercises a cold partner rather than only complete frames.
+    early_started = time.monotonic()
+    click(140, second_row_y, control=True)
+    key(0x32); key(0x32, False)
+    time.sleep(0.08)
+    viewer_width = width - 282
+    y = height * 0.55
+    x = 282 + viewer_width * 0.5
+    user.PostMessageW(hwnd, 0x200, 0, coordinates(x, y))
+    user.PostMessageW(hwnd, 0x201, 1, coordinates(x, y))
+    for step in range(40):
+        x = 282 + viewer_width * (0.5 + 0.3 * step / 39)
+        user.PostMessageW(hwnd, 0x200, 1, coordinates(x, y))
+        time.sleep(0.008)
+        probe()
+    user.PostMessageW(hwnd, 0x202, 0, coordinates(x, y))
+    moved = prefs(lambda p: p["mode"] == "Slider" and p["split"] > 0.75)
+    assert 0.75 < moved["split"] < 0.85, moved
+    key(0x33); key(0x33, False)
+    prefs(lambda p: p["mode"] == "Diff")
+    key(0x32); key(0x32, False)
+    prefs(lambda p: p["mode"] == "Slider")
+    early_streaming = {"interaction_ms": (time.monotonic() - early_started) * 1000,
+        "divider_fraction": moved["split"], "slider_diff_slider": True,
+        "note": "Early native input and persisted-state assertions; decoder readiness and visible pixels are not observed by this harness."}
+    # Isolate the early scenario from the ordinary test's startup/selection
+    # assumptions. Only this harness-owned settings file is reset, after exit.
+    user.PostMessageW(hwnd, 0x10, 0, 0)
+    assert process.wait(timeout=10) == 0, "Early paired input did not close cleanly"
+    settings_file.write_text(json.dumps({"version": 1, "mode": "Diff", "gain": 64,
+        "sigma": 3.1, "metrics_edge": 512}), encoding="utf-8")
+    process = subprocess.Popen(command)
+    hwnd = None
+    started = time.monotonic()
+    while time.monotonic() - started < 30:
+        hwnd = find_window()
+        if hwnd:
+            break
+        assert process.poll() is None, "App exited after early paired input"
+        time.sleep(0.1)
+    assert hwnd, "No window after the early paired input restart"
+    user.SetForegroundWindow(hwnd)
+    user.ShowWindow(hwnd, 9)
+
+start = time.monotonic()
+while time.monotonic() - start < args.seconds:
+    probe()
+    time.sleep(0.05)
+
 time.sleep(0.3)
 # Startup must remain effective Single with only A, despite a saved Diff choice.
 time.sleep(4 if "raw" in args.path.lower() else 0.6)
@@ -284,13 +332,14 @@ screenshot("file-context-menu")
 key(0x1B); key(0x1B, False)
 time.sleep(0.1)
 
-# Only clipping should change while these complete A/B textures are displayed.
+# The normal warm-view divider check; --streaming also tests early input above.
 viewer_width = width - 282
 y = height * 0.55
-user.PostMessageW(hwnd, 0x201, 1, coordinates(282 + viewer_width * 0.5, y))
+initial_split = prefs()["split"]
+user.PostMessageW(hwnd, 0x201, 1, coordinates(282 + viewer_width * initial_split, y))
 drag_start = time.perf_counter()
 for step in range(30):
-    x = 282 + viewer_width * (0.5 + 0.25 * step / 29)
+    x = 282 + viewer_width * (initial_split + (0.75 - initial_split) * step / 29)
     user.PostMessageW(hwnd, 0x200, 1, coordinates(x, y))
     time.sleep(0.008)
 user.PostMessageW(hwnd, 0x202, 0, coordinates(x, y))
@@ -359,11 +408,37 @@ screenshot("navigator-panned")
 # Repeated outward movement at an image edge must clamp, not lose the frame.
 edge_drag = (viewer_width * 0.75, height * 0.45)
 edge_start = (282 + viewer_width * 0.1, height * 0.2)
+pan_state_barriers = 0
+def settled_pan_preferences():
+    global pan_state_barriers
+    # A fixed delay can read the previous settings save and falsely conclude
+    # that a large-image pan has reached its edge. Round-trip a camera-neutral
+    # picker toggle after the posted mouse events; its persisted snapshot must
+    # include the preceding camera updates. Restore the original picker state.
+    enabled = prefs()["picker_enabled"]
+    key(0x43); key(0x43, False)
+    prefs(lambda p: p["picker_enabled"] != enabled)
+    key(0x43); key(0x43, False)
+    pan_state_barriers += 1
+    return prefs(lambda p: p["picker_enabled"] == enabled)
+
+previous_edge = None
+edge_history = []
 for _ in range(32):
-    drag("middle", *edge_drag, start=edge_start)
-edge = prefs()["camera"]["center"]
+    # Large RAWs at 800% need more than 32 gestures to reach the edge.
+    # Stop only after a settled batch no longer changes the actual camera.
+    for _ in range(8):
+        drag("middle", *edge_drag, start=edge_start)
+    edge = settled_pan_preferences()["camera"]["center"]
+    edge_history.append(edge)
+    if edge == previous_edge:
+        break
+    previous_edge = edge
+else:
+    raise AssertionError("Camera did not settle at an image edge within 256 drags")
 drag("middle", *edge_drag, start=edge_start)
-assert prefs()["camera"]["center"] == edge, "Camera escaped the nearest legal edge"
+confirmed_edge = settled_pan_preferences()["camera"]["center"]
+assert confirmed_edge == edge, ("Camera escaped the nearest legal edge", edge, confirmed_edge, edge_history)
 assert all(0 <= v <= 1 for v in edge), edge
 key(0x46); key(0x46, False)
 # A burst of real WM_MOUSEWHEEL events exercises deferred zoom in/out.
@@ -523,6 +598,8 @@ report = {"window_open_ms": open_ms,
     "screenshots_captured": not args.no_capture,
     "help_window_opened": bool(help_hwnd), "divider_drag_ms_30_moves": drag_ms,
     "screen_capture_fallbacks": capture_fallbacks,
+    "early_paired_input": early_streaming,
+    "pan_state_barriers": pan_state_barriers, "edge_pan_history": edge_history,
     "persisted_settings_max_wait_ms": max(preference_waits),
     "dpi_scale": scale, "client_logical_size": [width, height],
     "note": "WM_NULL checks event-loop responsiveness, not end-to-end image latency."}

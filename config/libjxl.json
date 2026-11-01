@@ -1,0 +1,10 @@
+{
+  "version": "0.12.0",
+  "files": {
+    "jxl.dll": "b0a7f7721836359b29841cca0f15969e85bd386344f9ee0775292089bd3bcfda",
+    "jxl_cms.dll": "cf4d1e872fe0730b0a39d34cc8414fbf9a4c85424708c1552de270330ec8ae51",
+    "brotlicommon.dll": "b6a024f4a3d82dc80b8faad898ca4637fe6fc8e4e65042b6036d53a0d933bcb1",
+    "brotlidec.dll": "6155edcd8dbb15e020d7f157074a9e3d4cec93d46d949192d23edcd37d1783d7",
+    "brotlienc.dll": "02db3121417982f3cc4871fb487e2356a4ac233c1b9eafeaaacfc0341f5ccaa2"
+  }
+}

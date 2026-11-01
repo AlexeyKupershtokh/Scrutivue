@@ -6166,6 +6166,7 @@ dependencies = [
  "gpui-kit",
  "image",
  "jxl-oxide",
+ "libloading 0.8.9",
  "libz-sys",
  "lru",
  "memmap2",

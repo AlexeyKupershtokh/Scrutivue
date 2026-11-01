@@ -22,8 +22,9 @@ A desktop application for comparing photographs and RAW images. **Rust · GPUI /
 - **Color picker** (`C`): an unsmoothed 1600% original-pixel loupe; A/B colors in RGB8/16, HEX, HSL, HSV, OKLCH and Lab/XYZ D65.
 - **Statistics** (`S`): progressive results for PSNR, SSIM, MS-SSIM, SSIMULACRA2, GMSD, LPIPS, MAE/RMSE and three separate A/B noise estimates. In-memory LFU caches hold 100 pairs and 20 intermediate resized copies. Completed live-frame hits do not reread files, hash pixels or recompute stages. Streaming resizes and released ONNX activation buffers reduce temporary/retained memory; [measurements and remaining costs](docs/statistics-performance.md). LPIPS uses ONNX + `ort`, without Python.
 - JPEG XL DNG 1.7 (RGB/grey16) is decompressed before LibRaw development. DNG DefaultCrop and JPEG orientation are respected without stretching. [DNG/JPEG dimensions](docs/dng.md), [pair loading/cache measurements](docs/loading-performance.md); source files are never changed.
+- Supported LinearRaw RGB16 JXL DNGs load both sides simultaneously: Slider starts at the divider and expands left/right; Diff starts at the center and displays differences wherever both tiles are ready. Tiles are reused while panning and completed during idle time. Optional native progression provides an early coarse stage outside Diff; high-pass and exact tools wait for complete development. [Runtime setup, limitations and making progressive test copies](docs/dng-streaming.md).
 - View settings, panel visibility and window size persist between sessions.
-- The divider only changes clipping of prepared textures, without recomputing images.
+- Once both frames are loaded, the divider only changes clipping of prepared textures, without recomputing images.
 - Add, recursion and clear controls stay above the library; help opens in a separate window (`F1`).
 
 ## Build and run
@@ -48,5 +49,7 @@ Download **Scrutivue-windows-x64** from a successful run's Artifacts section, th
 Comparison is fully offline, with no startup downloads. Formulas, analysis sizes and CLI usage: [metrics](docs/metrics.md). Use `--settings-file "X:\profile\settings.json"` for a separate settings profile.
 
 Details, limitations and validation commands: [manual](docs/manual.md), [measurements](docs/validation.md), [DX12 decision](docs/compute-decision.md). Initial RAW decoding takes seconds in the background; warm GPU measurements do not guarantee input-to-screen latency ≤100 ms on every machine.
+
+Developer-only decoder comparisons and stage timings: [DNG/JPEG XL experiments](docs/dng-jxl-experiments.md).
 
 MIT; LibRaw is used under CDDL-1.0. Notices: [LICENSES](LICENSES/README.md). The Slider overview uses CC0 Nikon Z9 HE/HE* samples from raw.pixls.us. The Diff, color picker and statistics screenshot was provided by the project author. Both show the native application, not an external UI mockup.

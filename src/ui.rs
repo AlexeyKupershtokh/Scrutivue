@@ -73,6 +73,10 @@ struct DisplayedView {
 
 pub struct Desk {
     services: Services,
+    streaming: crate::streaming::Worker,
+    stream_fallback: HashSet<PhotoId>,
+    stream_sizes: HashMap<PhotoId, [u32; 2]>,
+    stream_status: String,
     file_actions: FileActions,
     photos: Vec<Photo>,
     directory_roots: HashSet<PathBuf>,
@@ -207,6 +211,10 @@ impl Desk {
         window.focus(&focus, cx);
         Self {
             services,
+            streaming: crate::streaming::Worker::new(),
+            stream_fallback: HashSet::new(),
+            stream_sizes: HashMap::new(),
+            stream_status: String::new(),
             file_actions: FileActions::new(),
             photos: Vec::new(),
             directory_roots: HashSet::new(),
@@ -313,6 +321,87 @@ impl Desk {
         }
         self.services.retire_images(retired);
         let mut changed = false;
+        while let Ok(event) = self.streaming.events.try_recv() {
+            changed = true;
+            match event {
+                crate::streaming::Event::Snapshot {
+                    generation,
+                    pair,
+                    settings,
+                    size,
+                    primary,
+                    alternate,
+                    status,
+                    progress: _,
+                } if generation == self.generation
+                    && self.selected[0] == Some(pair[0])
+                    && self.selected[1].unwrap_or(pair[0]) == pair[1]
+                    && self.streaming_eligible() =>
+                {
+                    self.stream_sizes.insert(pair[0], size);
+                    self.retire_views();
+                    self.primary = Some(primary);
+                    self.alternate = alternate;
+                    if let Some(content) = self.current_render_content() {
+                        self.displayed_view = Some(DisplayedView {
+                            settings,
+                            image_size: size,
+                            content,
+                            generation,
+                        });
+                    }
+                    self.stream_status = status;
+                    self.rendering = true;
+                }
+                crate::streaming::Event::Snapshot {
+                    primary, alternate, ..
+                } => {
+                    self.services
+                        .retire_images(std::iter::once(primary).chain(alternate).collect());
+                }
+                crate::streaming::Event::Complete { id, frame }
+                    if self.selected.contains(&Some(id)) =>
+                {
+                    if let Some(index) = self.indices.get(&id) {
+                        self.photos[*index].metadata.dimensions = Some(frame.size());
+                        let photo = &self.photos[*index];
+                        self.services.remember_frame(
+                            photo.path.clone(),
+                            photo.metadata.clone(),
+                            frame.clone(),
+                        );
+                    }
+                    if let Some(old) = self.frames.insert(id, frame) {
+                        self.services.retire_frames(vec![old]);
+                    }
+                    if self
+                        .selected
+                        .iter()
+                        .flatten()
+                        .all(|id| self.frames.contains_key(id))
+                    {
+                        self.request_render();
+                    }
+                }
+                crate::streaming::Event::Complete { frame, .. } => {
+                    self.services.retire_frames(vec![frame])
+                }
+                crate::streaming::Event::Progress { generation, status } => {
+                    if generation == self.generation && self.streaming_eligible() {
+                        self.stream_status = status;
+                    }
+                }
+                crate::streaming::Event::Unsupported { ids, reason } => {
+                    if ids.iter().any(|id| self.selected.contains(&Some(*id))) {
+                        self.stream_fallback.extend(ids);
+                        self.stream_status.clear();
+                        self.message = reason;
+                        self.schedule_decodes();
+                        self.request_render();
+                    }
+                }
+            }
+        }
         while let Ok(update) = self.navigator_worker.events.try_recv() {
             if update.token == self.navigator_token {
                 if let Some(old) = self.navigator_image.replace(update.image) {
@@ -852,6 +941,10 @@ impl Desk {
     }
     fn clear(&mut self, cx: &mut Context<Self>) {
         self.services.clear();
+        self.streaming.clear();
+        self.stream_fallback.clear();
+        self.stream_sizes.clear();
+        self.stream_status.clear();
         self.reset_metrics();
         self.clear_picker();
         self.generation += 1;
@@ -928,10 +1021,10 @@ impl Desk {
             .map(|a| RenderContent::new([a, self.selected[1].unwrap_or(a)], &self.settings))
     }
     fn preview_camera_change(&mut self) {
-        if let Some(image) = self.selected[0].and_then(|id| self.frames.get(&id)) {
+        if self.selected[0].is_some() {
             self.settings
                 .camera
-                .clamp(image.size(), self.settings.viewport);
+                .clamp(self.image_size(), self.settings.viewport);
         }
         self.last_camera_change = Some(Instant::now());
         self.rendering = self.selected[0].is_some();
@@ -943,10 +1036,7 @@ impl Desk {
         picker_point: Option<[f32; 2]>,
         cx: &mut Context<Self>,
     ) {
-        if self.selected[0]
-            .and_then(|id| self.frames.get(&id))
-            .is_none()
-        {
+        if self.selected[0].is_none() || self.image_size() == [1, 1] {
             return;
         }
         let delta = event.delta.pixel_delta(px(36.));
@@ -984,17 +1074,39 @@ impl Desk {
             self.clear_picker();
         }
         let Some(aid) = self.selected[0] else {
+            self.streaming.clear();
+            self.stream_status.clear();
             self.rendering = false;
             return;
         };
         let bid = self.selected[1].unwrap_or(aid);
+        if self.streaming_eligible()
+            && (!self.frames.contains_key(&aid) || !self.frames.contains_key(&bid))
+        {
+            self.rendering = true;
+            let path = |id| self.photos[*self.indices.get(&id).unwrap()].path.clone();
+            self.streaming.request(crate::streaming::Request {
+                generation: self.generation,
+                pair: [(aid, path(aid)), (bid, path(bid))],
+                settings: self.settings.clone(),
+                ready: [
+                    self.frames.get(&aid).cloned(),
+                    self.frames.get(&bid).cloned(),
+                ],
+            });
+            return;
+        }
+        self.streaming.clear();
+        self.stream_status.clear();
         let Some(a) = self.frames.get(&aid) else {
             self.rendering = true;
+            self.schedule_decodes();
             return;
         };
         self.settings.camera.clamp(a.size(), self.settings.viewport);
         let Some(b) = self.frames.get(&bid) else {
             self.rendering = true;
+            self.schedule_decodes();
             return;
         };
         self.rendering = true;
@@ -1007,6 +1119,7 @@ impl Desk {
         self.update_picker();
     }
     fn selection_changed(&mut self) {
+        self.stream_status.clear();
         self.settings.mode = self.preferred_mode.effective(self.selected[1].is_some());
         self.reset_metrics();
         self.clear_picker();
@@ -1031,14 +1144,26 @@ impl Desk {
             self.services.renders.put(RenderJob::Clear);
         }
         self.schedule_decodes();
+        if self.streaming_eligible() {
+            for id in self.selected.iter().flatten() {
+                if !self.frames.contains_key(id) {
+                    if let Some(index) = self.indices.get(id) {
+                        self.services
+                            .lookup_frame(*id, self.photos[*index].path.clone());
+                    }
+                }
+            }
+        }
         self.request_render();
     }
     fn schedule_decodes(&self) {
+        let streaming = self.streaming_eligible();
         let mut jobs: Vec<_> = self
             .selected
             .iter()
             .flatten()
             .filter(|id| !self.frames.contains_key(id))
+            .filter(|_| !streaming)
             .filter_map(|id| {
                 self.indices
                     .get(id)
@@ -1050,7 +1175,7 @@ impl Desk {
             .focused_photo
             .and_then(|id| self.indices.get(&id))
             .copied()
-            .filter(|_| neighbor_prefetch_allowed(self.selected, self.metrics_open))
+            .filter(|_| !streaming && neighbor_prefetch_allowed(self.selected, self.metrics_open))
         {
             for neighbor in [index.checked_add(1), index.checked_sub(1)]
                 .into_iter()
@@ -1175,7 +1300,26 @@ impl Desk {
         self.selected[0]
             .and_then(|id| self.frames.get(&id))
             .map(|f| f.size())
+            .or_else(|| self.selected[0].and_then(|id| self.stream_sizes.get(&id).copied()))
+            .or_else(|| {
+                self.selected[0]
+                    .and_then(|id| self.indices.get(&id))
+                    .and_then(|i| self.photos[*i].metadata.dimensions)
+            })
             .unwrap_or([1, 1])
+    }
+    fn streaming_eligible(&self) -> bool {
+        self.selected[0].is_some()
+            && !self.settings.highpass
+            && self.selected.iter().flatten().all(|id| {
+                !self.stream_fallback.contains(id)
+                    && self.indices.get(id).is_some_and(|i| {
+                        self.photos[*i]
+                            .path
+                            .extension()
+                            .is_some_and(|e| e.eq_ignore_ascii_case("dng"))
+                    })
+            })
     }
     fn local_point(&self, p: Point<Pixels>) -> [f32; 2] {
         let origin = self.viewport_bounds.get().origin;
@@ -2359,9 +2503,11 @@ impl Desk {
                 .when(self.navigator_ready(), |el| el.right(px(260.)))
                 .when(!self.navigator_ready(), |el| el.right_3())
                 .flex().flex_col().items_start().gap_2()
-                .child(self.zoom_toolbar(cx)).child(floating().max_w_full().px_2().text_xs().text_color(rgb(MUTED))
+                .child(floating().max_w_full().px_2().text_xs().text_color(rgb(MUTED))
                     .child(div().max_w_full().truncate().child(self.backend.clone()))
-                    .when(!self.message.is_empty(),|el|el.child(div().max_w_full().truncate().child(self.message.clone())))))
+                    .when(!self.stream_status.is_empty(),|el|el.child(div().max_w_full().truncate().child(self.stream_status.clone())))
+                    .when(!self.message.is_empty(),|el|el.child(div().max_w_full().truncate().child(self.message.clone()))))
+                .child(self.zoom_toolbar(cx)))
             .when(self.navigator_ready(), |el| el.child(self.navigator_overlay(cx)));
         if self.picker_enabled && self.picker_samples.is_some() && self.picker_loupe.is_some() {
             viewport = viewport.child(self.picker_overlay());
@@ -2497,7 +2643,18 @@ impl Render for Desk {
                     this.settings.split = (this.local_point(event.position)[0]
                         / this.settings.viewport[0] as f32)
                         .clamp(0., 1.);
-                    cx.notify(); // No render request, readback, decode or new image handle.
+                    if this.streaming_eligible()
+                        && this
+                            .selected
+                            .iter()
+                            .flatten()
+                            .any(|id| !this.frames.contains_key(id))
+                    {
+                        this.last_camera_change = Some(Instant::now());
+                    }
+                    // Complete views only change clipping. Loading views also
+                    // reprioritize missing tiles around the new divider.
+                    cx.notify();
                 } else if let Some(last) = this
                     .pan_last
                     .filter(|_| this.pan_button == event.pressed_button)

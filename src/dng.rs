@@ -4,6 +4,7 @@
 //! The source file is read-only; the uncompressed TIFF exists only in memory.
 use anyhow::{bail, ensure, Context, Result};
 use rayon::prelude::*;
+pub mod tiles;
 
 #[derive(Clone, Copy)]
 struct Endian(bool);
@@ -621,7 +622,7 @@ mod tests {
     fn synthetic(e: Endian, subifd: bool) -> Vec<u8> {
         synthetic_size(e, subifd, 17, 19)
     }
-    fn synthetic_size(e: Endian, subifd: bool, w: u32, h: u32) -> Vec<u8> {
+    pub(super) fn synthetic_size(e: Endian, subifd: bool, w: u32, h: u32) -> Vec<u8> {
         let raw = if subifd { 38 } else { 8 };
         let count = 14;
         let tiles = (w.div_ceil(16) * h.div_ceil(16)) as usize;

@@ -33,7 +33,7 @@ static int check_cancel(void *data, enum LibRaw_progress, int, int) {
     return cancel->callback ? cancel->callback(cancel->context) : 0;
 }
 
-extern "C" int diff_raw_open_cancellable(const void *bytes, size_t length, int thumbnail,
+static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail, bool region,
                              RawView *out, char *error, size_t capacity,
                              CancelFn callback, void *context) {
     RawResult *result = nullptr;
@@ -70,6 +70,11 @@ extern "C" int diff_raw_open_cancellable(const void *bytes, size_t length, int t
             params.output_color = 1; // sRGB, consistent across all RAWs in the comparison.
             params.use_camera_wb = 1;
             params.no_auto_bright = 1;
+            // A tile is not an independent exposure. no_auto_bright disables
+            // histogram brightening, but NOT adjust_maximum's local white-point
+            // normalization. Retain the DNG white level for all preview tiles.
+            // Ordinary whole-frame development keeps its existing policy.
+            if (region) params.adjust_maximum_thr = 0.f;
             params.user_qual = 0; // Fast bilinear development; no denoise or sharpening.
             params.med_passes = 0;
             start = Clock::now();
@@ -102,6 +107,16 @@ extern "C" int diff_raw_open_cancellable(const void *bytes, size_t length, int t
         delete result;
         return fail(error, capacity, "LibRaw decoder exception");
     }
+}
+extern "C" int diff_raw_open_cancellable(const void *bytes, size_t length, int thumbnail,
+                             RawView *out, char *error, size_t capacity,
+                             CancelFn callback, void *context) {
+    return raw_open_cancellable(bytes, length, thumbnail, false, out, error, capacity, callback, context);
+}
+extern "C" int diff_raw_open_region_cancellable(const void *bytes, size_t length,
+                             RawView *out, char *error, size_t capacity,
+                             CancelFn callback, void *context) {
+    return raw_open_cancellable(bytes, length, 0, true, out, error, capacity, callback, context);
 }
 extern "C" int diff_raw_open(const void *bytes, size_t length, int thumbnail,
                              RawView *out, char *error, size_t capacity) {
