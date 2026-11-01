@@ -21,13 +21,22 @@ approximately 31 minutes including scheduling.
 | Artifact upload | 3 s |
 
 Evidence: the public
-[job/step API](https://api.github.com/repos/AlexeyKupershtokh/Scrutivue/actions/runs/41228737944/jobs).
-There were **no cache steps**, and the repository's public Actions cache API
-reported **zero entries** when reviewed. The test step includes dependency/native
-compilation, not just test execution. Authenticated detailed logs were unavailable
-in this environment, so its 19:27 must not be advertised as measured test-body
-time. Locally the latest 126 enabled tests completed in about 0.6 seconds after
-compilation; that is supporting evidence, not a runner benchmark.
+[job/step API](https://api.github.com/repos/AlexeyKupershtokh/Scrutivue/actions/runs/41228737944/jobs)
+and the full run log downloaded after the owner completed GitHub authentication.
+There were **no cache steps**, and the repository's Actions cache API reported
+**zero entries** when reviewed. The Cargo log confirms:
+
+- `Finished test profile [optimized + debuginfo] ... in 19m 25s`.
+- The tests themselves: **108 passed, 4 ignored, 0.73 seconds**.
+- `Finished release profile [optimized] ... in 10m 38s`.
+- **496 distinct crate/version entries were compiled in each profile**, with all
+  496 appearing in both, including GPUI, wgpu, image, JXL, ONNX Runtime bindings
+  and the application itself.
+
+The runner image was `windows-2025-vs2026`, image version `20261021.278.1`, runner
+version `2.338.2`. The raw archive and ANSI-stripped log are retained locally under
+`target/ci-review/`; credentials were not saved or printed. The old test count
+belongs to that earlier revision, not the latest 126-test implementation.
 
 The workflow built two different Cargo profiles. Development dependencies use
 optimization level 2, while release uses optimization level 3, thin LTO and one
