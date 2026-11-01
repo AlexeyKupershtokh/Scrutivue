@@ -70,9 +70,10 @@ without redeveloping it or performing filesystem checks on the UI thread.
 If one selected frame is already complete, the tile worker reuses it while
 loading the other source instead of decoding the completed side again.
 
-## Optional native runtime
+## Native runtime in Windows distributions
 
-Without a native runtime, visible-first tiles still work through the existing
+Windows distributions include the pinned native runtime and its notices. Custom
+development builds without it can still load tiles through the existing
 jxl-oxide decoder, but no native early-resolution flush is attempted. Native
 progression requires the audited Windows x64 libjxl 0.12.0 bundle whose individual
 DLL hashes are pinned in `config/libjxl.json`. Only `libjxl/jxl.dll` beside the
@@ -89,18 +90,28 @@ a first-tile header inspection used only as a progressive scheduling hint. Decod
 names are deliberately absent from normal viewer loading status.
 
 ```powershell
-python scripts/prepare_jxl_runtime.py --source 'D:/Tools/libjxl-0.12.0' --profile release
+python scripts/prepare_jxl_runtime.py --profile release
 cargo build --release --locked
 target/release/scrutivue.exe 'D:/Photos/halo'
 ```
 
-For this machine the audited source bundle was supplied at
-`E:/Documents/AI/REA_DXO/pipeline-graph/resources/native/libjxl-0.12.0`.
-The preparation command copies only into `target/<profile>/libjxl/`; it refuses
-to replace different runtime DLLs. No new automatic download or workflow trigger
-was added. Include the `libjxl/` directory and notices when distributing this
-local build. The matching `onnxruntime.dll` must also remain beside the EXE.
-Restart after changing runtime installation.
+The default preparation command downloads the official `v0.12.0`
+`jxl-x64-windows.zip` from the URL recorded in `config/libjxl.json`, verifies
+archive SHA-256 `4ee3f72134a2a49774c357f2bffecf30d752d702147896c493578789de15a97c`,
+then verifies all five DLLs and ten notices. Those DLL hashes are unchanged from
+the previously audited local bundle. The source ZIP uses Deflate64: 7-Zip is
+required during preparation, not by users of the resulting application ZIP.
+
+The normalized source is cached under `vendor/libjxl`; installation goes only
+into `target/<profile>/libjxl/` and refuses to replace different DLLs or notices.
+`--source 'D:/Tools/libjxl-0.12.0'` retains an audited local-bundle option, and
+`--archive 'D:/Downloads/jxl-x64-windows.zip'` supports the exact pinned ZIP offline.
+CI prepares/caches the source, then installs after restoring Cargo outputs so an
+old cache cannot replace the selected runtime. Workflow dispatch remains manual.
+Packaging now fails without the matching runtime/notices, and the extracted ZIP
+must pass a native tiled-DNG probe, not merely contain DLL filenames. Include
+the whole `libjxl/` directory; matching `onnxruntime.dll` must also remain beside
+the EXE. Restart after changing runtime installation.
 
 Ordinary full decoding of supported sources uses the **same native backend** as
 streamed final reconstruction when this bundle is installed. This matters for

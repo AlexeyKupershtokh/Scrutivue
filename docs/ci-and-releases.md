@@ -59,7 +59,7 @@ push or tag. No remote run was dispatched for this review.
   Restore the closest compatible previous commit, with a broader same-toolchain
   fallback for dependency changes. Cargo still checks freshness and rebuilds what
   changed; **a cache hit never skips tests or packaging validation**.
-- Cache pinned LibRaw sources and ONNX Runtime separately. Their exact pin/preparer
+- Cache pinned LibRaw/JPEG XL sources and ONNX Runtime separately. Their exact pin/preparer
   key has no broad restore fallback; preparation still runs after restoration.
 - Save the native cache as soon as preparation succeeds, and useful Cargo outputs
   even if subsequent tests/packaging fail. Do not save from a cancelled run.
@@ -138,15 +138,14 @@ version and approval. No release/tag was created during this review.
    The existing `scripts/package_windows.py` and `scripts/test_package.py` already
    provide a portable ZIP plus an extracted-binary/LPIPS validation path; versioned
    filenames, provenance and checksum publication are the next small additions.
-4. **Important runtime gap:** the current hosted workflow installs LibRaw/ONNX
-   Runtime but does not supply the optional native JXL bundle. Its ZIP therefore
-   works through the Rust fallback, unlike the locally prepared native build.
-   Before a native-enabled hosted release, establish an approved downloadable
-   Windows x64 JXL dependency bundle with the exact `config/libjxl.json` DLL hashes,
-   matching notices and a pinned archive URL/hash. Do not silently fetch arbitrary
-   latest DLLs or claim that hosted packages already include the native runtime.
-   Require that bundle when packaging native-enabled releases; the current general
-   packaging script deliberately treats it as optional.
+4. **Native JXL distribution is now configured:** the official Windows x64
+   `v0.12.0/jxl-x64-windows.zip` exactly matches the existing audited DLL/notice
+   hashes. `config/libjxl.json` records its URL, whole-archive SHA-256 and all ten
+   notice hashes. The hosted workflow prepares/caches it, then installs it after
+   Cargo cache restoration. Packaging requires the five pinned DLLs and notices;
+   the extracted executable must actually decode a generated tiled DNG through
+   the native backend. There is no new startup download, arbitrary latest-DLL
+   selection, release publication or automatic Actions trigger.
 5. Create an annotated tag and a draft release with the ZIP, checksums, concise
    changes, supported Windows/CPU architecture and unsigned-build/SmartScreen
    caveat. Review/download-test the draft before publishing it as Latest.
@@ -159,3 +158,19 @@ version and approval. No release/tag was created during this review.
 For a future automatic updater, design signature verification and rollback
 separately. A SHA-256 file on the same release helps detect corrupt downloads but
 is not a substitute for signed updates or Windows code signing.
+
+## Native JXL distribution validation, 2026-11-01
+
+The official source archive was downloaded and independently compared with the
+prior local runtime: all five DLLs and ten notices matched, with no DLL pin changes.
+The new online preparation path and offline pinned-archive path both passed local
+download/extraction/installation checks. Thirteen isolated Python tests cover
+missing/corrupt notices and DLLs, non-overwriting installation, failed/partial
+downloads, archive identity/entry validation and mandatory packaging.
+
+The release build and its headless native tiled-DNG/statistics/LPIPS smoke passed.
+`scripts/package_windows.py --output target/libjxl-distribution-review/Scrutivue-windows-x64.zip`
+produced a portable ZIP, and `scripts/test_package.py --archive` verified its
+embedded pins/notices and ran the extracted executable's native decode plus LPIPS
+checks. Records are under `target/libjxl-distribution-review/`. No new hosted
+Actions run was dispatched for this validation.

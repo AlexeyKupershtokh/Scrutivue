@@ -4,5 +4,6 @@
 /lumen-diff.exe
 /scrutivue.exe
 /onnxruntime.dll
+/libjxl/
 *.log
 **/__pycache__/

@@ -1,10 +1,28 @@
 {
   "version": "0.12.0",
+  "archive": {
+    "url": "https://github.com/libjxl/libjxl/releases/download/v0.12.0/jxl-x64-windows.zip",
+    "sha256": "4ee3f72134a2a49774c357f2bffecf30d752d702147896c493578789de15a97c",
+    "bytes": 23636813,
+    "prefix": "x64-windows/"
+  },
   "files": {
     "jxl.dll": "b0a7f7721836359b29841cca0f15969e85bd386344f9ee0775292089bd3bcfda",
     "jxl_cms.dll": "cf4d1e872fe0730b0a39d34cc8414fbf9a4c85424708c1552de270330ec8ae51",
     "brotlicommon.dll": "b6a024f4a3d82dc80b8faad898ca4637fe6fc8e4e65042b6036d53a0d933bcb1",
     "brotlidec.dll": "6155edcd8dbb15e020d7f157074a9e3d4cec93d46d949192d23edcd37d1783d7",
     "brotlienc.dll": "02db3121417982f3cc4871fb487e2356a4ac233c1b9eafeaaacfc0341f5ccaa2"
+  },
+  "licenses": {
+    "LICENSE.brotli": "60ae0f13e76cc2eaaa108677eefa4ce16b647f6bbe8cf0a1ac9429d82eca7248",
+    "LICENSE.giflib": "0c9b7990ecdca88b676db232c226548ac408b279f550d424d996f0d83591dd8e",
+    "LICENSE.highway": "5ad8c213095c573921d7388edf93f6a9f54490b8ebf3b165ae8ef1947cf70846",
+    "LICENSE.libjpeg-turbo": "2189dc45a8fe96204069f8124caa53a148dfdc193f50f584c6ca7849a6072872",
+    "LICENSE.libjxl": "2c783d8d5d952bd0726292e56ad1f3f247f370667809497a8020b8c2915ba470",
+    "LICENSE.libpng": "16d9daaafbf63a31a5bdc91d4600972548fef5aaa1244202393288dbd079c49a",
+    "LICENSE.libwebp": "050b5ba2c8eb0bd3b996e12ef79312a1c62237f2de1b3c609843f00bb74744f3",
+    "LICENSE.sjpeg": "3ddf9be5c28fe27dad143a5dc76eea25222ad1dd68934a047064e56ed2fa40c5",
+    "LICENSE.skcms": "5fad7f1a5143034fc76c976e9d34694663764808df7b777943048674a4c87ff1",
+    "LICENSE.zlib": "845efc77857d485d91fb3e0b884aaa929368c717ae8186b66fe1ed2495753243"
   }
 }

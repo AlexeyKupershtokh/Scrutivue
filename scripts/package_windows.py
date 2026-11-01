@@ -7,6 +7,7 @@ import shutil
 import subprocess
 import tempfile
 import zipfile
+from prepare_jxl_runtime import load_pin, validate_bundle
 
 ROOT = Path(__file__).resolve().parents[1]
 
@@ -16,19 +17,18 @@ def copy_file(source, destination):
     shutil.copyfile(source, destination)
 
 
-def optional_jxl_runtime(exe, bundle):
+def required_jxl_runtime(exe, bundle):
     source = exe.parent / "libjxl"
-    if not source.exists():
-        return
-    pin = json.loads((ROOT / "config/libjxl.json").read_text())
-    for name, expected in pin["files"].items():
-        path = source / name
-        if hashlib.sha256(path.read_bytes()).hexdigest() != expected:
-            raise SystemExit(f"Optional libjxl runtime checksum mismatch: {name}")
-        copy_file(path, bundle / "libjxl" / name)
-    if not (source / "licenses").is_dir():
-        raise SystemExit("Optional libjxl runtime is missing its upstream notices")
-    shutil.copytree(source / "licenses", bundle / "libjxl/licenses")
+    pin = load_pin()
+    try:
+        validate_bundle(source, pin)
+    except RuntimeError as error:
+        raise SystemExit(f"Cannot package without the pinned JPEG XL runtime and notices: {error}. Run scripts/prepare_jxl_runtime.py first.") from error
+    for name in pin["files"]:
+        copy_file(source / name, bundle / "libjxl" / name)
+    for name in pin["licenses"]:
+        copy_file(source / "licenses" / name, bundle / "libjxl/licenses" / name)
+    (bundle / "libjxl/bundle-pin.json").write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
 
 
 def rust_notices(destination):
@@ -95,19 +95,19 @@ def rust_notices(destination):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--exe", type=Path, default=ROOT / "target/release/scrutivue.exe")
+    parser.add_argument("--output", type=Path, default=ROOT / "target/dist/Scrutivue-windows-x64.zip")
     args = parser.parse_args()
     exe = args.exe.resolve(strict=True)
     runtime = exe.with_name("onnxruntime.dll")
     if not runtime.is_file():
         raise SystemExit("Matching onnxruntime.dll must be beside scrutivue.exe")
-    output = ROOT / "target/dist"
-    output.mkdir(parents=True, exist_ok=True)
-    archive = output / "Scrutivue-windows-x64.zip"
+    archive = args.output.resolve()
+    archive.parent.mkdir(parents=True, exist_ok=True)
     with tempfile.TemporaryDirectory(prefix="package-", dir=ROOT / "target") as temporary:
         bundle = Path(temporary) / "Scrutivue"
         copy_file(exe, bundle / "scrutivue.exe")
         copy_file(runtime, bundle / "onnxruntime.dll")
-        optional_jxl_runtime(exe, bundle)
+        required_jxl_runtime(exe, bundle)
         copy_file(ROOT / "LICENSE", bundle / "LICENSE")
         shutil.copytree(ROOT / "LICENSES", bundle / "LICENSES")
         for name in ("LICENSE", "ThirdPartyNotices.txt"):
@@ -119,7 +119,7 @@ def main():
         (bundle / "README.txt").write_text(
             "Scrutivue — photograph and RAW comparison\n\n"
             "Extract this entire folder, then run scrutivue.exe. Keep onnxruntime.dll beside it.\n"
-            "If included, keep the libjxl subdirectory for native progressive DNG loading.\n"
+            "Keep the included libjxl subdirectory and its licenses for native JPEG XL DNG loading.\n"
             "Use Help / F1 for controls. Comparison runs offline; source images are never changed.\n"
             "Source and build instructions: https://github.com/AlexeyKupershtokh/Scrutivue\n"
             "Native runtime and published Rust dependency notices are under LICENSES.\n"

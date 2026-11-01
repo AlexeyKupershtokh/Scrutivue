@@ -22,12 +22,14 @@ ort is MIT/Apache-2.0; Microsoft's ONNX Runtime is MIT. Include the official
 runtime's LICENSE and ThirdPartyNotices.txt from vendor/onnxruntime when
 distributing its DLL.
 
-Optional native JPEG XL progression uses the separate libjxl 0.12.0 bundle
+Windows distributions include the separate libjxl 0.12.0 bundle
 pinned in `config/libjxl.json` (BSD-3-Clause, with its dependency notices).
-`scripts/prepare_jxl_runtime.py` retains the supplied bundle's upstream licenses
-under `target/<profile>/libjxl/licenses`; the Windows packager includes that
-directory when the optional runtime is installed. No Redlamp LibRaw substitution
-or automatic runtime download is involved.
+`scripts/prepare_jxl_runtime.py` fetches the official Windows x64 release archive,
+verifies its pinned SHA-256 and each DLL/notice, and retains the upstream licenses
+under `target/<profile>/libjxl/licenses`. The Windows packager requires all five
+pinned DLLs and all ten supplied upstream notices. Downloading is build-time only;
+the application does not fetch runtime components. No Redlamp LibRaw substitution
+is involved.
 
 The embedded ONNX graph combines official LPIPS 0.1.4 learned Squeeze v0.1
 weights (richzhang/PerceptualSimilarity, BSD-2-Clause) and torchvision's
