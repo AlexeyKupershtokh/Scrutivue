@@ -42,6 +42,10 @@ passes. No embedded JPEG is used for the main view.
   final development. Low-zoom batches expand after the first update without adding
   threads. Provisional viewport snapshots are throttled to approximately 40 ms;
   offscreen completion updates progress without recompositing an unchanged view.
+  Diff mip-cell preparation and viewport rows use the same bounded pool, so a
+  large difference preview cannot leave all decoder workers idle behind a serial
+  composition loop. Render tasks share only read-only source/frame views, never
+  live progressive decoder handles. See [one-ready-source timings](diff-streaming-performance.md).
 - Once full-resolution tiles are complete, eligible sources produce the final
   RGB16 frame **directly from their already developed tiles**, applying the
   original crop/orientation. There is no second LibRaw development or JXL entropy
@@ -96,6 +100,11 @@ If one selected frame is already complete, the tile worker reuses it while
 loading the other source instead of decoding the completed side again. Completed
 inactive frames are not additionally pinned by the partial-source LRU; the existing
 full-frame cache has its own six-entry / 1 GiB policy.
+
+The separate, opt-in [third single-source experiment](single-parallel-experiment.md)
+parallelizes Single preview rows, keeps only the first progressive coarse start
+before batching, and allows a larger bounded worker budget only for a single
+selected source. The normal and second executables keep the policy above.
 
 ## Guarded completion from developed tiles
 

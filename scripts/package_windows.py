@@ -31,6 +31,16 @@ def required_jxl_runtime(exe, bundle):
     (bundle / "libjxl/bundle-pin.json").write_text(json.dumps(pin, indent=2) + "\n", encoding="utf-8")
 
 
+def required_lpips_model(exe, bundle):
+    pin = json.loads((ROOT / "assets/models/lpips-squeeze-v0.1.json").read_text(encoding="utf-8"))
+    source = exe.parent / "models" / pin["model"]
+    if not source.is_file():
+        raise SystemExit(f"Cannot package without the LPIPS model beside the executable: {source}. Restore it from assets/models/ before packaging.")
+    if hashlib.sha256(source.read_bytes()).hexdigest() != pin["sha256"]:
+        raise SystemExit(f"LPIPS model checksum mismatch: {source}. Restore it from assets/models/ before packaging.")
+    copy_file(source, bundle / "models" / pin["model"])
+
+
 def rust_notices(destination):
     """Keep each published crate's metadata and supplied license/notice files."""
     supplemental_root = ROOT / "LICENSES/Rust-supplemental"
@@ -107,6 +117,7 @@ def main():
         bundle = Path(temporary) / "Scrutivue"
         copy_file(exe, bundle / "scrutivue.exe")
         copy_file(runtime, bundle / "onnxruntime.dll")
+        required_lpips_model(exe, bundle)
         required_jxl_runtime(exe, bundle)
         copy_file(ROOT / "LICENSE", bundle / "LICENSE")
         shutil.copytree(ROOT / "LICENSES", bundle / "LICENSES")
@@ -115,10 +126,13 @@ def main():
         for pin in ("libraw.json", "onnxruntime.json", "libjxl.json"):
             copy_file(ROOT / "config" / pin, bundle / "build-info" / pin)
         copy_file(ROOT / "assets/models/lpips-squeeze-v0.1.json", bundle / "build-info/lpips-squeeze-v0.1.json")
+        for name in ("parallel_raw.cpp", "parallel_raw.h"):
+            copy_file(ROOT / "native" / name, bundle / "build-info/native" / name)
         rust_notices(bundle / "LICENSES")
         (bundle / "README.txt").write_text(
             "Scrutivue — photograph and RAW comparison\n\n"
             "Extract this entire folder, then run scrutivue.exe. Keep onnxruntime.dll beside it.\n"
+            "Keep models/lpips-squeeze-v0.1.onnx for offline LPIPS statistics.\n"
             "Keep the included libjxl subdirectory and its licenses for native JPEG XL DNG loading.\n"
             "Use Help / F1 for controls. Comparison runs offline; source images are never changed.\n"
             "Source and build instructions: https://github.com/AlexeyKupershtokh/Scrutivue\n"

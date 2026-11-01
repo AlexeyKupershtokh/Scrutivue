@@ -140,3 +140,68 @@ fn unavailable_mip_cells_are_retried_and_full_development_invalidates_preview_ce
     assert_eq!(ready, 32 * 32);
     assert!(pixels.chunks_exact(4).all(|p| p[0] > 0));
 }
+
+#[test]
+fn ready_a_and_partial_b_are_byte_identical_with_one_or_six_render_workers() {
+    let one = rayon::ThreadPoolBuilder::new()
+        .num_threads(1)
+        .build()
+        .unwrap();
+    let six = rayon::ThreadPoolBuilder::new()
+        .num_threads(6)
+        .build()
+        .unwrap();
+    for bsize in [[65, 49], [47, 37]] {
+        let (mut a, af) = image_state(
+            &format!("parallel-ready-a-{}", bsize[0]),
+            [65, 49],
+            |x, y| [(x * 917 + y * 113) as u16; 3],
+        );
+        let (mut b, bf) = image_state(
+            &format!("parallel-partial-b-{}", bsize[0]),
+            bsize,
+            |x, y| [(x * 233 + y * 1259) as u16; 3],
+        );
+        a.full = Some(af);
+        a.source.tiles.iter_mut().for_each(|tile| *tile = None);
+        let count = b.source.tiles.len();
+        let mut tiles = std::mem::replace(&mut b.source.tiles, (0..count).map(|_| None).collect());
+        let (mut serial, mut parallel) = (Preview::default(), Preview::default());
+        for stage in 0..5 {
+            match stage {
+                1 => b.source.tiles[0] = tiles[0].take(),
+                2 => b.source.tiles[0].as_mut().unwrap().ratio = 8,
+                3 => {
+                    b.source.tiles[0].as_mut().unwrap().ratio = 1;
+                    for (slot, saved) in b.source.tiles.iter_mut().zip(&mut tiles).skip(1) {
+                        *slot = saved.take();
+                    }
+                }
+                4 => {
+                    b.full = Some(bf.clone());
+                    b.source.tiles.iter_mut().for_each(|tile| *tile = None);
+                }
+                _ => {}
+            }
+            for zoom in [0.25, 0.37, 1., 4.] {
+                let settings = Settings {
+                    mode: Mode::Diff,
+                    viewport: [79, 53],
+                    gain: 16,
+                    camera: Camera {
+                        zoom: Zoom::Fixed(zoom),
+                        center: [0.43, 0.57],
+                    },
+                    ..Default::default()
+                };
+                let (av, bv) = (a.samples(), b.samples());
+                let expected = one.install(|| serial.render_samples([1, 2], av, bv, &settings));
+                let actual = six.install(|| parallel.render_samples([1, 2], av, bv, &settings));
+                assert_eq!(actual, expected, "b={bsize:?}, stage={stage}, zoom={zoom}");
+                if stage == 0 || stage == 2 {
+                    assert_eq!(actual.1, 0);
+                }
+            }
+        }
+    }
+}

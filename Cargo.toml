@@ -6,6 +6,25 @@ description = "Scrutivue — a GPU-assisted photograph and RAW comparison viewer
 license = "MIT"
 repository = "https://github.com/AlexeyKupershtokh/Scrutivue"
 build = "build.rs"
+default-run = "scrutivue"
+
+[features]
+experimental-jxl-parallel = []
+experimental-single-parallel = ["experimental-jxl-parallel"]
+
+[[bin]]
+name = "scrutivue-jxl-parallel"
+path = "src/bin/scrutivue-jxl-parallel.rs"
+required-features = ["experimental-jxl-parallel"]
+test = false
+bench = false
+
+[[bin]]
+name = "scrutivue-single-parallel"
+path = "src/bin/scrutivue-single-parallel.rs"
+required-features = ["experimental-single-parallel"]
+test = false
+bench = false
 
 [dependencies]
 gpui-kit = "=0.8.1"

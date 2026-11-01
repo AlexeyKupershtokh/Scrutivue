@@ -9,6 +9,14 @@ The source archive, SHA-256 and preparation command are recorded in
 `config/libraw.json` and `scripts/prepare.py`. This includes Redlamp's Nikon HE/HE*
 decoder; do not replace it with an ordinary upstream LibRaw binary.
 
+`native/parallel_raw.cpp` and `native/parallel_raw.h` adapt orchestration and
+processing loops from that exact source under the same CDDL-1.0 option (also
+offered under LGPL-2.1). They retain Dmitri Sotnikov's Nikon HE and LibRaw LLC's
+processing attribution. The original vendor source remains unchanged. Windows
+ZIPs include these adapter sources under `build-info/native/` and their notice
+in `LICENSES/LibRaw-adapters.txt`; the application adds no OpenMP runtime or
+replacement RAW decoder.
+
 GPUI, GPUI Kit and their GPUI snapshots retain their Apache-2.0 notices in their
 crate distributions. wgpu is MIT/Apache-2.0. Cargo.lock records exact versions of
 all Rust dependencies. The Windows packaging script includes the published
@@ -31,7 +39,7 @@ pinned DLLs and all ten supplied upstream notices. Downloading is build-time onl
 the application does not fetch runtime components. No Redlamp LibRaw substitution
 is involved.
 
-The embedded ONNX graph combines official LPIPS 0.1.4 learned Squeeze v0.1
+The distributed `models/lpips-squeeze-v0.1.onnx` graph combines official LPIPS 0.1.4 learned Squeeze v0.1
 weights (richzhang/PerceptualSimilarity, BSD-2-Clause) and torchvision's
 SqueezeNet1_1_Weights.IMAGENET1K_V1 (BSD-3-Clause). Their full notices are
 LPIPS.txt and torchvision.txt. Provenance, exporter versions and SHA-256 are

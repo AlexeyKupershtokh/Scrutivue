@@ -17,6 +17,7 @@ use std::{
     thread,
     time::Instant,
 };
+mod model;
 
 pub fn run_options() -> Result<RunOptions> {
     static RUNTIME: std::sync::OnceLock<std::result::Result<(), String>> =
@@ -748,6 +749,7 @@ pub struct Lpips {
     session: Option<Session>,
 }
 fn lpips_session(use_arena: bool) -> Result<Session> {
+    let path = model::installed()?;
     Ok(Session::builder()?
         .with_execution_providers([ort::ep::CPU::default()
             .with_arena_allocator(use_arena)
@@ -757,7 +759,7 @@ fn lpips_session(use_arena: bool) -> Result<Session> {
         .map_err(|e| anyhow::anyhow!("{e}"))?
         .with_inter_threads(1)
         .map_err(|e| anyhow::anyhow!("{e}"))?
-        .commit_from_memory(include_bytes!("../assets/models/lpips-squeeze-v0.1.onnx"))
+        .commit_from_file(path)
         .context("LPIPS ONNX model initialization")?)
 }
 impl Lpips {

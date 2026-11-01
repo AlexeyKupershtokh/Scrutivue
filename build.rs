@@ -1,6 +1,20 @@
 use std::{env, fs, path::PathBuf};
 
 fn main() {
+    let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
+    let profile = out.ancestors().nth(3).unwrap();
+    println!("cargo:rerun-if-changed=assets/models/lpips-squeeze-v0.1.json");
+    let model_pin: serde_json::Value =
+        serde_json::from_str(&fs::read_to_string("assets/models/lpips-squeeze-v0.1.json").unwrap())
+            .unwrap();
+    let model_name = model_pin["model"].as_str().unwrap();
+    let model = PathBuf::from("assets/models").join(model_name);
+    println!("cargo:rerun-if-changed={}", model.display());
+    // Runtime assets stay outside the executable, including beside test binaries.
+    for directory in [profile.join("models"), profile.join("deps/models")] {
+        fs::create_dir_all(&directory).unwrap();
+        fs::copy(&model, directory.join(model_name)).expect("copy LPIPS model beside executable");
+    }
     println!("cargo:rerun-if-changed=config/onnxruntime.json");
     if env::var("CARGO_CFG_TARGET_OS").as_deref() == Ok("windows") {
         let source = PathBuf::from("vendor/onnxruntime");
@@ -14,8 +28,6 @@ fn main() {
             "Run python scripts/prepare.py to fetch ONNX Runtime"
         );
         println!("cargo:rerun-if-changed=vendor/onnxruntime/.diff-pin");
-        let out = PathBuf::from(env::var_os("OUT_DIR").unwrap());
-        let profile = out.ancestors().nth(3).unwrap();
         for directory in [profile.to_path_buf(), profile.join("deps")] {
             fs::create_dir_all(&directory).unwrap();
             fs::copy(
@@ -70,6 +82,8 @@ END
             .unwrap();
     }
     println!("cargo:rerun-if-changed=native/raw.cpp");
+    println!("cargo:rerun-if-changed=native/parallel_raw.h");
+    println!("cargo:rerun-if-changed=native/parallel_raw.cpp");
     println!("cargo:rerun-if-changed=config/libraw.json");
     println!("cargo:rerun-if-env-changed=DIFF_LIBRAW_SOURCE");
     let pin: serde_json::Value =
@@ -112,7 +126,8 @@ END
         .define("LIBRAW_NODLL", None)
         .define("USE_ZLIB", None)
         .include(&source)
-        .file("native/raw.cpp");
+        .file("native/raw.cpp")
+        .file("native/parallel_raw.cpp");
     if let Ok(include) = env::var("DEP_Z_INCLUDE") {
         build.include(include);
     }

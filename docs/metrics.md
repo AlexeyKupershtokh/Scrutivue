@@ -49,11 +49,43 @@ Triangle resizing now streams the same vertical-then-horizontal RGB16 arithmetic
 
 ## ONNX Runtime
 
-The application **does not use Python, PyTorch, subprocesses or a separate environment**. The executable embeds `assets/models/lpips-squeeze-v0.1.onnx` (~2.8 MB); its provenance, export details and SHA-256 are recorded in the adjacent JSON. Official SqueezeNet ImageNet weights and learned LPIPS v0.1 weights are not replaced with random weights. Inference uses Rust `ort 2.0.0-rc.12` / official CPU ONNX Runtime **1.24.4**, with two intra-op threads. The session is initialized lazily and reused by the background metrics worker. The model has dynamic H/W, NCHW `[1,3,H,W]`, opset 17.
+The application **does not use Python, PyTorch, subprocesses or a separate environment**. It loads `models/lpips-squeeze-v0.1.onnx` (~2.8 MB) beside the executable; weights are no longer embedded in the EXE. Cargo copies the repository asset from `assets/models/` into both the build output and test-binary directories. Provenance, export details and SHA-256 are recorded in `assets/models/lpips-squeeze-v0.1.json` and shipped as `build-info/lpips-squeeze-v0.1.json`. Official SqueezeNet ImageNet weights and learned LPIPS v0.1 weights are not replaced with random weights. Inference uses Rust `ort 2.0.0-rc.12` / official CPU ONNX Runtime **1.24.4**, with two intra-op threads. The model is hash-checked and the session initialized lazily on the background metrics worker, then reused. The model has dynamic H/W, NCHW `[1,3,H,W]`, opset 17.
 
-`onnxruntime.dll` must be beside the executable; build preparation downloads it with SHA-256 verification. If the DLL is missing, native metrics still work and LPIPS reports an error. The application does not access the network or upload photographs. The UI makes no promise that expensive metrics finish within 100 ms.
+`onnxruntime.dll` and the `models/` folder must be beside the executable; build preparation downloads the runtime with SHA-256 verification. Neither the working directory nor photo folders are searched for model files. If the DLL/model is missing, unreadable or the model checksum is wrong, native metrics still work and LPIPS reports an error explaining what to restore. Packaging requires the exact pinned model and validates it again in the ZIP. No model export or download occurs during build/startup. The application does not access the network or upload photographs. The UI makes no promise that expensive metrics finish within 100 ms.
 
 `scripts/export_lpips.py` is **developer-only**, for reproducing the shipped ONNX. It requires CPU `torch 2.8.0`, `torchvision 0.23.0`, `lpips 0.1.4`, `onnx 1.19.1` and official weights. Neither the build nor the application runs it. LPIPS/torchvision licenses are in `LICENSES/`.
+
+### External-model validation, 2026-11-01
+
+The third experimental release target was rebuilt with external weights; the
+normal and runner-only application binaries were not overwritten. The preceding
+three EXEs and native runtimes are preserved under
+`target/external-model-review/previous/`. The rebuilt third EXE shrank from
+35,021,824 to **32,090,112 bytes**; the separate model is 2,947,874 bytes. Its full
+model payload is absent from the new EXE. This reduces embedded data, not the
+total distributed model size; no build-time speedup is claimed from this change.
+
+Those size/results describe the model-only build, now preserved under
+`target/jpeg-parallel-review/previous/`; the release target is subsequently
+rebuilt with [parallel JPEG preparation](jpeg-loading-performance.md), followed
+by [parallel NEF adapters](nef-loading-performance.md).
+
+- Feature-disabled tests: **153 passed, 10 ignored**. Third-feature tests:
+  **158 passed, 12 ignored**. Model packaging guards: **3 passed**; existing
+  JPEG XL preparation/packaging guards: **13 passed**.
+- Four nonidentical generated pairs at 32x32, 65x37, 256x192 and 191x255 produced
+  **exactly identical LPIPS and native metric results** with the saved embedded
+  model and the new file-backed model. No Python ML runtime was used.
+- The local ZIP includes the external weights, model provenance/pin, matching
+  ONNX Runtime, pinned JPEG XL bundle and dependency notices. Extracted CLI smoke
+  passed from a Unicode/spaced path and a different working directory.
+- Missing and corrupt model tests kept native statistics available and returned
+  an LPIPS restoration/checksum error. A valid decoy model in the working
+  directory was correctly ignored in both cases.
+
+Artifacts and reports: `target/external-model-review/`. The ZIP is a local
+experimental build, not an updated published release. No remote workflow was
+dispatched or release assets updated; the original model asset/hash and codec pins are intact.
 
 ## CLI and validation
 

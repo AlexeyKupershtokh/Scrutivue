@@ -1,8 +1,11 @@
 //! Optional pinned libjxl runtime. A session owns input/output through destruction.
-//! Public v0.12 C ABI only; no embedded previews, runner or display profile.
+//! Public v0.12 C ABI only; no embedded previews or display profile.
+//! An opt-in experimental binary adds a bounded, caller-pool parallel runner.
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{ffi::c_void, path::Path, ptr::NonNull, sync::Arc};
+#[cfg(feature = "experimental-jxl-parallel")]
+mod parallel;
 
 #[repr(C)]
 #[derive(Default)]
@@ -94,6 +97,8 @@ pub struct Library {
     size: unsafe extern "C" fn(*const c_void, *const Format, *mut usize) -> i32,
     buffer: unsafe extern "C" fn(*mut c_void, *const Format, *mut c_void, usize) -> i32,
     ratio: unsafe extern "C" fn(*mut c_void) -> usize,
+    #[cfg(feature = "experimental-jxl-parallel")]
+    runner: unsafe extern "C" fn(*mut c_void, Option<parallel::Runner>, *mut c_void) -> i32,
     _library: libloading::Library,
 }
 impl Library {
@@ -149,6 +154,8 @@ impl Library {
                 size: get(&library, b"JxlDecoderImageOutBufferSize\0")?,
                 buffer: get(&library, b"JxlDecoderSetImageOutBuffer\0")?,
                 ratio: get(&library, b"JxlDecoderGetIntendedDownsamplingRatio\0")?,
+                #[cfg(feature = "experimental-jxl-parallel")]
+                runner: get(&library, b"JxlDecoderSetParallelRunner\0")?,
                 _library: library,
             })
         }
@@ -173,7 +180,8 @@ pub struct Session {
     original: bool,
     frame_seen: bool,
 }
-// Each decoder is exclusively owned, with no thread-affine runner/callbacks.
+// Each decoder is exclusively owned, with no thread-affine state. The optional
+// runner is synchronous and borrows the current pool, never the decoder handle.
 // Moving it preserves the heap addresses of its retained input/output buffers.
 // libjxl instances may run on different threads, but never concurrently through
 // the same handle; advance requires &mut self. Deliberately do not implement Sync.
@@ -185,6 +193,19 @@ impl Drop for Session {
 }
 impl Session {
     pub fn new(library: Arc<Library>, input: Vec<u8>, bounds: [u32; 2]) -> Result<Self> {
+        Self::create(
+            library,
+            input,
+            bounds,
+            cfg!(feature = "experimental-jxl-parallel"),
+        )
+    }
+    fn create(
+        library: Arc<Library>,
+        input: Vec<u8>,
+        bounds: [u32; 2],
+        _parallel: bool,
+    ) -> Result<Self> {
         let handle = NonNull::new(unsafe { (library.create)(std::ptr::null()) })
             .context("Create libjxl decoder")?;
         let session = Self {
@@ -202,6 +223,14 @@ impl Session {
             frame_seen: false,
         };
         unsafe {
+            #[cfg(feature = "experimental-jxl-parallel")]
+            if _parallel {
+                check((session.library.runner)(
+                    handle.as_ptr(),
+                    Some(parallel::run),
+                    std::ptr::null_mut(),
+                ))?;
+            }
             check((session.library.subscribe)(
                 handle.as_ptr(),
                 0x40 | 0x100 | 0x400 | 0x1000 | 0x8000,
@@ -365,5 +394,50 @@ mod tests {
         let mut fresh = source.session(0, library).unwrap();
         fresh.advance(1, &|| false).unwrap();
         assert_eq!(session.pixels, fresh.pixels);
+    }
+
+    #[test]
+    #[cfg(feature = "experimental-jxl-parallel")]
+    #[ignore = "requires SCRUTIVUE_JXL_TEST_LIBRARY and SCRUTIVUE_PROGRESSIVE_TEST_DNG"]
+    fn native_parallel_runner_matches_sequential_tiles_and_progressive_stages() {
+        let library = Arc::new(
+            Library::load(Path::new(
+                &std::env::var_os("SCRUTIVUE_JXL_TEST_LIBRARY").unwrap(),
+            ))
+            .unwrap(),
+        );
+        let source = crate::dng::tiles::Source::open(Path::new(
+            &std::env::var_os("SCRUTIVUE_PROGRESSIVE_TEST_DNG").unwrap(),
+        ))
+        .unwrap();
+        let pool = rayon::ThreadPoolBuilder::new()
+            .num_threads(6)
+            .build()
+            .unwrap();
+        for index in [0, source.tiles.len() / 2, source.tiles.len() - 1] {
+            let input = source.payload(index).unwrap().to_vec();
+            let mut sequential =
+                Session::create(library.clone(), input.clone(), source.tile_size, false).unwrap();
+            let mut parallel =
+                Session::create(library.clone(), input, source.tile_size, true).unwrap();
+            assert!(parallel.advance(8, &|| true).is_err());
+            for ratio in [8, 4, 2, 1] {
+                let reference = sequential.advance(ratio, &|| false).unwrap();
+                let result = pool.install(|| parallel.advance(ratio, &|| false)).unwrap();
+                assert_eq!(result, reference);
+                assert_eq!(parallel.size, sequential.size);
+                assert_eq!(
+                    parallel.pixels, sequential.pixels,
+                    "tile {index}, ratio {ratio}"
+                );
+            }
+            assert!(parallel.complete && sequential.complete);
+        }
+        // Also exercise the outside-pool CLI/progressive entry and decoder move.
+        let mut session = source.session(0, library).unwrap();
+        session.advance(8, &|| false).unwrap();
+        std::thread::spawn(move || session.advance(1, &|| false).unwrap())
+            .join()
+            .unwrap();
     }
 }

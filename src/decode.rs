@@ -5,6 +5,12 @@ use std::{
     path::Path,
     sync::Arc,
 };
+mod jpeg;
+#[cfg(test)]
+mod nef_tests;
+mod parallel;
+#[cfg(test)]
+mod profile;
 
 #[derive(Debug)]
 pub struct Frame {
@@ -252,14 +258,18 @@ fn orient_thumbnail(image: DynamicImage, flip: u32) -> DynamicImage {
     }
 }
 
-fn raster(path: &Path) -> Result<DynamicImage> {
+fn raster_unoriented(path: &Path) -> Result<(DynamicImage, image::metadata::Orientation, bool)> {
     use image::ImageDecoder;
     let reader = image::ImageReader::open(path)?.with_guessed_format()?;
+    let jpeg = reader.format() == Some(image::ImageFormat::Jpeg);
     let mut decoder = reader.into_decoder()?;
     let orientation = decoder
         .orientation()
         .unwrap_or(image::metadata::Orientation::NoTransforms);
-    let mut image = DynamicImage::from_decoder(decoder)?;
+    Ok((DynamicImage::from_decoder(decoder)?, orientation, jpeg))
+}
+fn raster(path: &Path) -> Result<DynamicImage> {
+    let (mut image, orientation, _) = raster_unoriented(path)?;
     image.apply_orientation(orientation);
     Ok(image)
 }
@@ -438,7 +448,13 @@ pub fn decode_cancellable(
     let image = if crate::model::is_raw(path) {
         raw_cancellable(path, false, cancelled)?
     } else {
-        raster(path)?
+        let (mut image, orientation, is_jpeg) = raster_unoriented(path)?;
+        anyhow::ensure!(!cancelled(), "Image decode cancelled");
+        if is_jpeg {
+            return jpeg::frame(image, orientation, cancelled);
+        }
+        image.apply_orientation(orientation);
+        image
     };
     anyhow::ensure!(!cancelled(), "Image decode cancelled");
     let rgb = image.into_rgb16();

@@ -72,6 +72,8 @@ for name in ["anyhow", "image", "memmap2", "rayon", "jxl_oxide", "sha2", "bytemu
 exe = out / "tests.exe"
 subprocess.run(cmd + ["-o", str(exe)], env=env, check=True)
 shutil.copy2(ROOT / "vendor/onnxruntime/lib/onnxruntime.dll", out / "onnxruntime.dll")
+(out / "models").mkdir(exist_ok=True)
+shutil.copy2(ROOT / "assets/models/lpips-squeeze-v0.1.onnx", out / "models/lpips-squeeze-v0.1.onnx")
 if args.tests:
     raise SystemExit(subprocess.run([str(exe), "--nocapture"], env=env).returncode)
 env.update(SCRUTIVUE_METRICS_PROFILE="1", SCRUTIVUE_PROFILE_METRIC_EDGE=str(args.edge),

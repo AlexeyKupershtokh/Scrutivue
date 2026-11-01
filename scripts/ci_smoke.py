@@ -1,4 +1,4 @@
-"""Headless Windows/CI check: full statistics and embedded ONNX without Python ML."""
+"""Headless Windows/CI check: full statistics and external ONNX without Python ML."""
 import argparse
 import json
 from pathlib import Path
@@ -68,6 +68,9 @@ def main():
     exe = args.exe.resolve(strict=True)
     if not exe.with_name("onnxruntime.dll").is_file():
         raise SystemExit("onnxruntime.dll must be beside scrutivue.exe")
+    pin = json.loads((ROOT / "assets/models/lpips-squeeze-v0.1.json").read_text(encoding="utf-8"))
+    if not (exe.parent / "models" / pin["model"]).is_file():
+        raise SystemExit("The models folder with the LPIPS ONNX model must be beside scrutivue.exe")
     # No UI, network, reference-image download or modification of user preferences.
     subprocess.run([str(exe), "--help"], check=True, stdout=subprocess.DEVNULL, timeout=30)
     (ROOT / "target").mkdir(exist_ok=True)
@@ -99,7 +102,7 @@ def main():
         assert report["pixels"]["psnr_db"] is None, report
         assert abs(report["ssim_y"] - 1) < 1e-6, report
         assert abs(report["neural"]["Ok"]["lpips"]) < 1e-7, report
-    print("Standalone CLI, native tile completion/fallback with legacy RGB16 equality, statistics and embedded LPIPS passed.")
+    print("Standalone CLI, native tile completion/fallback with legacy RGB16 equality, statistics and external LPIPS passed.")
 
 
 if __name__ == "__main__":

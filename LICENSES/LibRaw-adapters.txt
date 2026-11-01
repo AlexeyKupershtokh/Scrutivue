@@ -1,0 +1,19 @@
+Scrutivue parallel LibRaw adapters
+
+Files: native/parallel_raw.cpp, native/parallel_raw.h
+Derived from the Redlamp LibRaw fork at:
+https://github.com/pdcgomes/redlamp-libraw/tree/f4956c404fba0c6035ce9e06353d4b4ffe068fc7
+
+Nikon HE decoder: Copyright (C) 2026 Dmitri Sotnikov.
+LibRaw processing: Copyright (C) 2019-2025 LibRaw LLC.
+
+These adaptations are distributed under LibRaw's CDDL-1.0 option, and are also
+offered under its alternative LGPL-2.1 terms. Full CDDL terms are in
+LICENSES/CDDL-1.0.txt. The pinned original source archive and SHA-256 are recorded
+in build-info/libraw.json. The original vendor source and pin are unchanged.
+
+The adapters parallelize independently indexed Nikon HE stripes, repair their
+coefficient carry rows before reconstruction, and implement LibRaw's virtual
+processing hotspots with the same numerical operations. Development settings,
+transfer curve, sensor geometry and final color/orientation policy are retained.
+Adapter source is included in this distribution under build-info/native/.

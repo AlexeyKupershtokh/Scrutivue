@@ -1,4 +1,5 @@
 #include "libraw/libraw.h"
+#include "parallel_raw.h"
 #include <cstdint>
 #include <cstring>
 #include <exception>
@@ -9,7 +10,7 @@
 
 // Own the LibRaw allocation until Rust finishes reading it. Each job has its own instance.
 struct RawResult {
-    LibRaw decoder;
+    ParallelRaw decoder;
     libraw_processed_image_t *image = nullptr;
     ~RawResult() { if (image) LibRaw::dcraw_clear_mem(image); }
 };
@@ -142,7 +143,7 @@ extern "C" unsigned diff_raw_matching_tile_policy(const void *original, size_t o
     } catch (...) { return 0; }
 }
 
-static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail, bool region,
+static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail, bool region, bool parallel,
                              RawView *out, char *error, size_t capacity,
                              CancelFn callback, void *context) {
     RawResult *result = nullptr;
@@ -175,6 +176,7 @@ static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail,
             if (!status) result->image = result->decoder.dcraw_make_mem_thumb(&memory_error);
         } else {
             configure_development(result->decoder, region);
+            if (parallel) result->decoder.enable_parallel(bytes, length, callback, context);
             start = Clock::now();
             status = result->decoder.unpack();
             unpack_ns = elapsed();
@@ -209,15 +211,31 @@ static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail,
 extern "C" int diff_raw_open_cancellable(const void *bytes, size_t length, int thumbnail,
                              RawView *out, char *error, size_t capacity,
                              CancelFn callback, void *context) {
-    return raw_open_cancellable(bytes, length, thumbnail, false, out, error, capacity, callback, context);
+    return raw_open_cancellable(bytes, length, thumbnail, false, true, out, error, capacity, callback, context);
 }
 extern "C" int diff_raw_open_region_cancellable(const void *bytes, size_t length,
                              RawView *out, char *error, size_t capacity,
                              CancelFn callback, void *context) {
-    return raw_open_cancellable(bytes, length, 0, true, out, error, capacity, callback, context);
+    return raw_open_cancellable(bytes, length, 0, true, false, out, error, capacity, callback, context);
+}
+extern "C" int diff_raw_open_legacy_cancellable(const void *bytes, size_t length, int thumbnail,
+                             RawView *out, char *error, size_t capacity,
+                             CancelFn callback, void *context) {
+    return raw_open_cancellable(bytes, length, thumbnail, false, false, out, error, capacity, callback, context);
 }
 extern "C" int diff_raw_open(const void *bytes, size_t length, int thumbnail,
                              RawView *out, char *error, size_t capacity) {
     return diff_raw_open_cancellable(bytes, length, thumbnail, out, error, capacity, nullptr, nullptr);
 }
 extern "C" void diff_raw_close(void *owner) { delete static_cast<RawResult *>(owner); }
+// Read-only diagnostics for independent raw/RGB reference tests.
+extern "C" int diff_raw_uses_parallel(void *owner) {
+    return owner && static_cast<RawResult *>(owner)->decoder.parallel_enabled();
+}
+extern "C" const unsigned short *diff_raw_sensor_samples(void *owner, size_t *count) {
+    if (!owner || !count) return nullptr;
+    const auto &raw = static_cast<RawResult *>(owner)->decoder.imgdata.rawdata;
+    if (!raw.raw_image || raw.sizes.raw_pitch != raw.sizes.raw_width * 2) return nullptr;
+    *count = size_t(raw.sizes.raw_width) * raw.sizes.raw_height;
+    return raw.raw_image;
+}

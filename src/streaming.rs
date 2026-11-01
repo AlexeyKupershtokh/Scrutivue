@@ -21,7 +21,13 @@ use std::{
     time::{Duration, Instant},
 };
 mod difference;
+#[cfg(test)]
+mod profile;
 mod retention;
+#[cfg(test)]
+mod single_profile;
+#[cfg(test)]
+mod single_tests;
 
 #[derive(Clone)]
 pub struct Request {
@@ -118,40 +124,11 @@ impl State {
             .map(|tile| tile.raw.capacity() * std::mem::size_of::<u16>() + tile.display.bytes())
             .sum()
     }
-    fn sample_exact(&self, x: u32, y: u32) -> Option<[u16; 3]> {
-        if self.full.is_none() {
-            let index = self.source.index_at(self.source.raw_point(x, y));
-            if self.source.tiles[index].as_ref()?.ratio != 1 {
-                return None;
-            }
+    fn samples(&self) -> Samples<'_> {
+        Samples {
+            source: &self.source,
+            full: self.full.as_deref(),
         }
-        self.sample(x, y)
-    }
-    fn rect_ready(&self, rect: [u32; 4]) -> bool {
-        if self.full.is_some() {
-            return true;
-        }
-        let [x0, y0, x1, y1] = rect;
-        let points = [
-            self.source.raw_point(x0, y0),
-            self.source.raw_point(x1, y0),
-            self.source.raw_point(x0, y1),
-            self.source.raw_point(x1, y1),
-        ];
-        let lo: [u32; 2] = std::array::from_fn(|a| {
-            points.iter().map(|p| p[a]).min().unwrap() / self.source.tile_size[a]
-        });
-        let hi: [u32; 2] = std::array::from_fn(|a| {
-            points.iter().map(|p| p[a]).max().unwrap() / self.source.tile_size[a]
-        });
-        let nx = self.source.raw_size[0].div_ceil(self.source.tile_size[0]);
-        (lo[1]..=hi[1]).all(|y| {
-            (lo[0]..=hi[0]).all(|x| {
-                self.source.tiles[(y * nx + x) as usize]
-                    .as_ref()
-                    .is_some_and(|t| t.ratio == 1)
-            })
-        })
     }
     fn step(
         &mut self,
@@ -213,7 +190,58 @@ impl State {
         }
         Ok(())
     }
+}
+
+/// Read-only render data deliberately excludes the exclusively owned, non-Sync
+/// progressive decoder. Sharing pixels must never share a live decoder handle.
+#[derive(Clone, Copy)]
+struct Samples<'a> {
+    source: &'a Source,
+    full: Option<&'a Frame>,
+}
+impl Samples<'_> {
+    fn sample_exact(&self, x: u32, y: u32) -> Option<[u16; 3]> {
+        self.sample_with_policy(x, y, true)
+    }
+    fn has_exact_pixels(&self) -> bool {
+        self.full.is_some()
+            || self
+                .source
+                .tiles
+                .iter()
+                .flatten()
+                .any(|tile| tile.ratio == 1)
+    }
+    fn rect_ready(&self, rect: [u32; 4]) -> bool {
+        if self.full.is_some() {
+            return true;
+        }
+        let [x0, y0, x1, y1] = rect;
+        let points = [
+            self.source.raw_point(x0, y0),
+            self.source.raw_point(x1, y0),
+            self.source.raw_point(x0, y1),
+            self.source.raw_point(x1, y1),
+        ];
+        let lo: [u32; 2] = std::array::from_fn(|axis| {
+            points.iter().map(|p| p[axis]).min().unwrap() / self.source.tile_size[axis]
+        });
+        let hi: [u32; 2] = std::array::from_fn(|axis| {
+            points.iter().map(|p| p[axis]).max().unwrap() / self.source.tile_size[axis]
+        });
+        let nx = self.source.raw_size[0].div_ceil(self.source.tile_size[0]);
+        (lo[1]..=hi[1]).all(|y| {
+            (lo[0]..=hi[0]).all(|x| {
+                self.source.tiles[(y * nx + x) as usize]
+                    .as_ref()
+                    .is_some_and(|tile| tile.ratio == 1)
+            })
+        })
+    }
     fn sample(&self, x: u32, y: u32) -> Option<[u16; 3]> {
+        self.sample_with_policy(x, y, false)
+    }
+    fn sample_with_policy(&self, x: u32, y: u32, exact: bool) -> Option<[u16; 3]> {
         if let Some(frame) = &self.full {
             let p = ((y * frame.width + x) * 3) as usize;
             return Some(frame.rgb[p..p + 3].try_into().unwrap());
@@ -221,6 +249,9 @@ impl State {
         let point = self.source.raw_point(x, y);
         let index = self.source.index_at(point);
         let tile = self.source.tiles[index].as_ref()?;
+        if exact && tile.ratio != 1 {
+            return None;
+        }
         let origin = self.source.origin(index);
         let x = (point[0] - origin[0]) / tile.ratio;
         let y = (point[1] - origin[1]) / tile.ratio;
@@ -325,17 +356,29 @@ fn priority_tiles(
     indices
 }
 fn pixels(state: &State, reference: [u32; 2], settings: &Settings) -> Vec<u8> {
+    pixels_from_samples(state.samples(), reference, settings, false)
+}
+fn pixels_from_samples(
+    state: Samples<'_>,
+    reference: [u32; 2],
+    settings: &Settings,
+    parallel: bool,
+) -> Vec<u8> {
     let [w, h] = settings.viewport;
     let scale = settings.camera.scale(reference, settings.viewport);
     let mut pixels = vec![0; w as usize * h as usize * 4];
-    for y in 0..h {
+    if w == 0 || h == 0 {
+        return pixels;
+    }
+    let row = |(y, row): (usize, &mut [u8])| {
+        let y = y as u32;
         for x in 0..w {
             let sx = settings.camera.center[0] * reference[0] as f32
                 + (x as f32 + 0.5 - w as f32 / 2.) / scale;
             let sy = settings.camera.center[1] * reference[1] as f32
                 + (y as f32 + 0.5 - h as f32 / 2.) / scale;
-            let p = ((y * w + x) * 4) as usize;
-            pixels[p + 3] = 255;
+            let p = x as usize * 4;
+            row[p + 3] = 255;
             let inside =
                 sx >= 0. && sy >= 0. && sx < reference[0] as f32 && sy < reference[1] as f32;
             let value = if inside {
@@ -349,11 +392,11 @@ fn pixels(state: &State, reference: [u32; 2], settings: &Settings) -> Vec<u8> {
                 None
             };
             if let Some(rgb) = value {
-                pixels[p] = (rgb[2] as u32 * 255 / 65535) as u8;
-                pixels[p + 1] = (rgb[1] as u32 * 255 / 65535) as u8;
-                pixels[p + 2] = (rgb[0] as u32 * 255 / 65535) as u8;
+                row[p] = (rgb[2] as u32 * 255 / 65535) as u8;
+                row[p + 1] = (rgb[1] as u32 * 255 / 65535) as u8;
+                row[p + 2] = (rgb[0] as u32 * 255 / 65535) as u8;
             } else {
-                pixels[p..p + 3].fill(if inside {
+                row[p..p + 3].fill(if inside {
                     30
                 } else if (x / 16 + y / 16) & 1 == 1 {
                     19
@@ -362,6 +405,14 @@ fn pixels(state: &State, reference: [u32; 2], settings: &Settings) -> Vec<u8> {
                 });
             }
         }
+    };
+    if parallel {
+        pixels
+            .par_chunks_mut(w as usize * 4)
+            .enumerate()
+            .for_each(row);
+    } else {
+        pixels.chunks_mut(w as usize * 4).enumerate().for_each(row);
     }
     pixels
 }
@@ -370,20 +421,27 @@ fn publish(
     job: &Request,
     states: &HashMap<PhotoId, State>,
     difference: &mut difference::Preview,
+    pool: &rayon::ThreadPool,
 ) {
     let ids = job.pair.each_ref().map(|p| p.0);
     let a = &states[&ids[0]];
     let b = &states[&ids[1]];
     let [w, h] = job.settings.viewport;
     let (primary, difference_pixels) = if job.settings.mode == Mode::Diff {
-        let (pixels, ready) = difference.render(ids, a, b, &job.settings);
+        let (a, b) = (a.samples(), b.samples());
+        let (pixels, ready) = pool.install(|| difference.render_samples(ids, a, b, &job.settings));
         (render_image(w, h, pixels), ready)
     } else {
         difference.clear();
-        (
-            render_image(w, h, pixels(a, a.source.size, &job.settings)),
-            0,
-        )
+        let primary = if cfg!(feature = "experimental-single-parallel") && ids[0] == ids[1] {
+            let samples = a.samples();
+            let reference = a.source.size;
+            // Only immutable pixels enter the bounded pool, never a live session.
+            pool.install(|| pixels_from_samples(samples, reference, &job.settings, true))
+        } else {
+            pixels(a, a.source.size, &job.settings)
+        };
+        (render_image(w, h, primary), 0)
     };
     let alternate = if ids[0] == ids[1] || job.settings.mode == Mode::Diff {
         None
@@ -404,9 +462,15 @@ fn publish(
     // Qualification must not postpone the first visible tile. Warm its lazy
     // header check only AFTER publishing, not while opening either source.
     if published.is_ok() {
-        a.source.prepare_completion_policy();
-        if ids[0] != ids[1] {
-            b.source.prepare_completion_policy();
+        for state in [a, b]
+            .into_iter()
+            .take(if ids[0] == ids[1] { 1 } else { 2 })
+        {
+            // A cached full frame needs no qualification. An empty partner must
+            // get its first visible tile before a header-copy optimization runs.
+            if state.full.is_none() && state.source.tiles.iter().any(Option::is_some) {
+                state.source.prepare_completion_policy();
+            }
         }
     }
 }
@@ -569,6 +633,12 @@ fn next_round(
                 && job.settings.mode != Mode::Diff
                 && job.settings.camera.scale(reference, job.settings.viewport) < 0.5
                 && state.source.progressive_hint
+                // Keep the first fast coarse update. Repeating it for every
+                // single-image tile serializes decoding and regional development.
+                // Paired Slider keeps its original scheduling policy.
+                && (!cfg!(feature = "experimental-single-parallel")
+                    || job.pair[0].0 != job.pair[1].0
+                    || state.source.tiles.iter().all(Option::is_none))
                 && state.source.tiles[indices[0]].is_none();
             let work = if let Some((index, _)) = &state.pending {
                 if indices.contains(index) {
@@ -616,7 +686,16 @@ fn execute_round(
         Work::Batch(indices) => batch(state, indices, pool, library, cancelled),
     };
     match plans {
-        [one] => advance(states.get_mut(&one.id).unwrap(), &one.work),
+        [one] => {
+            let state = states.get_mut(&one.id).unwrap();
+            if cfg!(feature = "experimental-single-parallel") {
+                // A retained progressive session must use this caller's pool,
+                // not libjxl's separate CLI fallback registry.
+                pool.install(|| advance(state, &one.work))
+            } else {
+                advance(state, &one.work)
+            }
+        }
         [a, b] => {
             let [a_state, b_state] = states.get_disjoint_mut([&a.id, &b.id]);
             let (a_result, b_result) = parallel_pair(
@@ -657,18 +736,28 @@ fn finish_round(
     }
     Ok(frames)
 }
+fn worker_threads(logical: usize, single: bool) -> usize {
+    let paired = logical.div_ceil(2).clamp(2, 6);
+    if cfg!(feature = "experimental-single-parallel") && single {
+        // Extra SMT workers help independent tile development. Leave two logical
+        // CPUs of scheduling headroom; paired decoding keeps its original budget.
+        logical.saturating_sub(2).clamp(2, 12).max(paired)
+    } else {
+        paired
+    }
+}
 fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU64>) {
     let library = jxl::Library::installed().ok();
-    let threads = thread::available_parallelism()
+    let logical = thread::available_parallelism()
         .map(usize::from)
-        .unwrap_or(2)
-        .div_ceil(2)
-        .clamp(2, 6);
+        .unwrap_or(2);
     let pool = rayon::ThreadPoolBuilder::new()
-        .num_threads(threads)
+        .num_threads(worker_threads(logical, false))
         .thread_name(|i| format!("dng-tiles-{i}"))
         .build()
         .expect("DNG tile pool");
+    #[cfg(feature = "experimental-single-parallel")]
+    let mut single_pool = None;
     let mut states = HashMap::<PhotoId, State>::new();
     let mut retention = retention::Retention::default();
     let mut difference = difference::Preview::default();
@@ -697,6 +786,25 @@ fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU6
             }
         };
         let selected: Vec<_> = job.pair.iter().map(|p| p.0).collect();
+        #[cfg(feature = "experimental-single-parallel")]
+        let pool = if selected[0] == selected[1]
+            && worker_threads(logical, true) != pool.current_num_threads()
+        {
+            single_pool.get_or_insert_with(|| {
+                rayon::ThreadPoolBuilder::new()
+                    .num_threads(worker_threads(logical, true))
+                    .thread_name(|i| format!("dng-single-{i}"))
+                    .build()
+                    .expect("DNG single-source pool")
+            }) as &rayon::ThreadPool
+        } else {
+            &pool
+        };
+        #[cfg(not(feature = "experimental-single-parallel"))]
+        let pool = &pool;
+        // Only one registry runs at a time, on this coordinator. Returning to a
+        // pair never inherits the single-source runner's larger worker count.
+        let threads = pool.current_num_threads();
         for (id, path) in &job.pair {
             if states
                 .get(id)
@@ -750,7 +858,7 @@ fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU6
                 states[id].full.is_some() || states[id].source.tiles.iter().any(Option::is_some)
             })
         {
-            publish(&tx, &job, &states, &mut difference);
+            publish(&tx, &job, &states, &mut difference, pool);
             view_dirty = false;
             published = Instant::now();
         }
@@ -761,8 +869,7 @@ fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU6
             let idle = start.elapsed() >= Duration::from_millis(250);
             let plans = next_round(&states, &job, idle, threads, library.is_some());
             if !plans.is_empty() {
-                let result =
-                    execute_round(&mut states, &plans, &pool, library.as_ref(), &cancelled);
+                let result = execute_round(&mut states, &plans, pool, library.as_ref(), &cancelled);
                 if let Err(error) = result {
                     if cancelled() {
                         continue 'requests;
@@ -778,7 +885,7 @@ fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU6
                 view_dirty |= plans.iter().any(|p| p.visible);
                 if published.elapsed() >= Duration::from_millis(40) {
                     if view_dirty {
-                        publish(&tx, &job, &states, &mut difference);
+                        publish(&tx, &job, &states, &mut difference, pool);
                         view_dirty = false;
                     } else {
                         publish_progress(&tx, &job, &states);
@@ -790,14 +897,14 @@ fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU6
             if idle {
                 // Publish the last paired-tile view before full LibRaw work.
                 if view_dirty {
-                    publish(&tx, &job, &states, &mut difference);
+                    publish(&tx, &job, &states, &mut difference, pool);
                 } else {
                     publish_progress(&tx, &job, &states);
                 }
                 match finish_round(
                     &mut states,
                     job.pair.each_ref().map(|p| p.0),
-                    &pool,
+                    pool,
                     &cancelled,
                 ) {
                     Ok(frames) => {
@@ -823,7 +930,7 @@ fn run(jobs: Receiver<(u64, Command)>, tx: Sender<Event>, revision: Arc<AtomicU6
                 continue 'requests;
             }
             if view_dirty {
-                publish(&tx, &job, &states, &mut difference);
+                publish(&tx, &job, &states, &mut difference, pool);
                 view_dirty = false;
                 published = Instant::now();
             }
@@ -938,7 +1045,7 @@ pub fn probe(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
             if (x + y * size[0]) % 97 != 0 {
                 continue;
             }
-            let pixel = state.sample(x, y).unwrap();
+            let pixel = state.samples().sample(x, y).unwrap();
             let p = ((y * size[0] + x) * 3) as usize;
             for c in 0..3 {
                 let error = pixel[c].abs_diff(frame.rgb[p + c]);
@@ -967,9 +1074,15 @@ pub fn probe(path: &std::path::Path) -> anyhow::Result<serde_json::Value> {
 pub fn probe_resume(paths: [PathBuf; 2]) -> anyhow::Result<serde_json::Value> {
     use anyhow::{ensure, Context};
     let sources = [Source::open(&paths[0])?, Source::open(&paths[1])?];
+    let budget = worker_threads(
+        thread::available_parallelism()
+            .map(usize::from)
+            .unwrap_or(2),
+        true,
+    );
     ensure!(
-        sources.iter().all(|s| s.tiles.len() > 6),
-        "Use sources with more than six tiles for partial-return validation"
+        sources.iter().all(|s| s.tiles.len() > budget),
+        "Use sources with more tiles than the worker budget for partial-return validation"
     );
     let settings = Settings {
         viewport: [128, 128],
@@ -1036,7 +1149,7 @@ pub fn probe_resume(paths: [PathBuf; 2]) -> anyhow::Result<serde_json::Value> {
     worker.request(request(6, 0));
     let (cleared, _) = snapshot(6, 0)?;
     ensure!(
-        cleared.done[0] <= 6,
+        cleared.done[0] <= budget,
         "Explicit clear did not discard retained tiles"
     );
     ensure!(
@@ -1286,7 +1399,7 @@ mod tests {
             frame,
         )
     }
-    fn empty_pair(name: &str, settings: Settings) -> (HashMap<PhotoId, State>, Request) {
+    pub(super) fn empty_pair(name: &str, settings: Settings) -> (HashMap<PhotoId, State>, Request) {
         let path = crate::dng::tiles::fixture(name, 256, 128);
         let states = [1, 2]
             .into_iter()
@@ -1379,7 +1492,13 @@ mod tests {
         worker.request(selection_request(6, 1, &a));
         let cleared = selection_snapshot(&worker, 6, 1);
         assert!(
-            cleared.done[0] <= 6,
+            cleared.done[0]
+                <= worker_threads(
+                    thread::available_parallelism()
+                        .map(usize::from)
+                        .unwrap_or(2),
+                    true
+                ),
             "Explicit Clear must discard retained tiles"
         );
     }
@@ -1391,7 +1510,13 @@ mod tests {
         worker.request(selection_request(1, 1, &a));
         selection_snapshot(&worker, 1, 12);
         worker.request(selection_request(2, 1, &b));
-        assert!(selection_snapshot(&worker, 2, 1).done[0] <= 6);
+        let budget = worker_threads(
+            thread::available_parallelism()
+                .map(usize::from)
+                .unwrap_or(2),
+            true,
+        );
+        assert!(selection_snapshot(&worker, 2, 1).done[0] <= budget);
         selection_snapshot(&worker, 2, 12);
         std::fs::OpenOptions::new()
             .write(true)
@@ -1400,7 +1525,7 @@ mod tests {
             .set_modified(std::time::SystemTime::now() + Duration::from_secs(2))
             .unwrap();
         worker.request(selection_request(3, 1, &b));
-        assert!(selection_snapshot(&worker, 3, 1).done[0] <= 6);
+        assert!(selection_snapshot(&worker, 3, 1).done[0] <= budget);
     }
     #[test]
     fn successful_batch_tiles_survive_other_cancelled_or_failed_results() {
@@ -1616,6 +1741,7 @@ mod tests {
         assert_eq!(plans.len(), 1);
         assert_eq!(plans[0].id, 2);
         assert!(plans[0].visible);
+        assert_eq!(first_indices(&plans[0].work).len(), 6);
     }
     #[test]
     fn visible_tile_plan_covers_only_the_view_and_reuses_pan_overlap() {

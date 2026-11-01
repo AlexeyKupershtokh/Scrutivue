@@ -83,12 +83,14 @@ jobs:
         run: cargo fmt --all --check
       - name: Test JPEG XL runtime preparation and packaging guards
         run: python -m unittest discover -s scripts -p test_jxl_runtime.py -v
+      - name: Test external LPIPS model packaging guards
+        run: python -m unittest discover -s scripts -p test_model_assets.py -v
       - name: Test native computations and caches
         id: tests
         run: cargo test --release --locked
       - name: Build release
         run: cargo build --release --locked
-      - name: Check standalone CLI and embedded LPIPS
+      - name: Check standalone CLI and external LPIPS
         run: python scripts/ci_smoke.py --exe target/release/scrutivue.exe
       - name: Package Windows x64 application and notices
         run: |

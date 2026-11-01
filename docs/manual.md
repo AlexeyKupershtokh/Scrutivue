@@ -18,7 +18,7 @@ If Cargo is not in PATH: `& "$env:USERPROFILE\.cargo\bin\cargo.exe" run --releas
 
 `scripts/prepare.py` downloads **the same LibRaw fork and commit pinned in `../redlamp/config/vendored-libs.json`** and verifies SHA-256. The neighboring Redlamp checkout is not modified and is not needed for subsequent builds. Do not replace this fork with upstream LibRaw: it supplies Nikon HE/HE* decoding. Pin: `f4956c404fba0c6035ce9e06353d4b4ffe068fc7`. The build reads the authoritative C++ source list from the fork's `Makefile.dist`.
 
-Preparation also downloads Microsoft's official CPU ONNX Runtime **1.24.4**, checking SHA-256 (`config/onnxruntime.json`). Cargo copies `onnxruntime.dll` beside the debug/release EXE. Distribute them together with the notices in `LICENSES/` and ONNX Runtime LICENSE/ThirdPartyNotices. The embedded LPIPS ONNX model needs no export or download during build/startup.
+Preparation also downloads Microsoft's official CPU ONNX Runtime **1.24.4**, checking SHA-256 (`config/onnxruntime.json`). Cargo copies `onnxruntime.dll` and `models/lpips-squeeze-v0.1.onnx` beside the debug/release EXE and test binaries. Distribute them together with the notices in `LICENSES/` and ONNX Runtime LICENSE/ThirdPartyNotices. The LPIPS ONNX model is a separate pinned file, not embedded weights; it needs no export or download during build/startup. Its path is relative to the executable, never the current working directory. Missing/corrupt model files disable LPIPS with a restoration error, not image viewing or other metrics.
 
 Linux also needs the GPUI/Wayland/X11 and RFD system dependencies, plus native ONNX Runtime ≥1.24 beside the executable. This workspace validates Windows x64; other platforms require separate builds and measurements.
 
