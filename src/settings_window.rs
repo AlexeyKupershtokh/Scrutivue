@@ -147,7 +147,7 @@ impl Pane {
         {
             div()
                 .child(heading("Windows Open with"))
-                .child(note("Offer this executable as a viewer for supported image extensions for the current Windows user. No administrator rights are needed; default apps are not changed. Register again after moving the application."))
+                .child(note("Offer this executable as a viewer for supported image extensions for the current Windows user. Opening an image selects it and lists other supported images in its folder. No administrator rights are needed; default apps are not changed. Register again after moving or updating the application."))
                 .child(div().flex().gap_3()
                     .child(Button::new("windows-open-with-register").label("Register").small().disabled(self.integration_busy)
                         .tooltip("Add Scrutivue to Windows Open with for supported images")

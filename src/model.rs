@@ -81,11 +81,23 @@ pub fn select_slot(selected: &mut [Option<PhotoId>; 2], id: PhotoId, slot: usize
 }
 
 pub fn select_initial(selected: &mut [Option<PhotoId>; 2], photos: &[Photo]) -> bool {
+    select_initial_path(selected, photos, None)
+}
+
+/// Wait for a requested canonical path instead of selecting an earlier batch.
+pub fn select_initial_path(
+    selected: &mut [Option<PhotoId>; 2],
+    photos: &[Photo],
+    preferred: Option<&Path>,
+) -> bool {
     let before = *selected;
     if selected[0].is_none() {
-        selected[0] = selected[1]
-            .take()
-            .or_else(|| photos.first().map(|photo| photo.id));
+        selected[0] = selected[1].take().or_else(|| {
+            preferred
+                .map(|path| photos.iter().find(|photo| photo.path == path))
+                .unwrap_or_else(|| photos.first())
+                .map(|photo| photo.id)
+        });
     }
     before != *selected
 }
@@ -346,6 +358,32 @@ pub fn navigate_selection(selected: &mut [Option<PhotoId>; 2], id: PhotoId) {
 #[cfg(test)]
 mod tests {
     use super::*;
+    #[test]
+    fn requested_initial_file_waits_for_later_batches_and_never_replaces_a_selection() {
+        let photo = |id, name: &str| Photo {
+            id,
+            path: PathBuf::from(name),
+            name: name.into(),
+            metadata: PhotoMetadata::default(),
+            explicit: false,
+            roots: HashSet::new(),
+        };
+        let mut photos = vec![photo(1, "folder/a.png")];
+        let target = Path::new("folder/z — 日本語.png");
+        let mut selected = [None; 2];
+        assert!(!select_initial_path(&mut selected, &photos, Some(target)));
+        assert_eq!(selected, [None; 2]);
+        photos.push(photo(2, target.to_str().unwrap()));
+        assert!(select_initial_path(&mut selected, &photos, Some(target)));
+        assert_eq!(selected, [Some(2), None]);
+        assert!(!select_initial_path(&mut selected, &photos, Some(target)));
+        selected = [Some(1), None];
+        assert!(!select_initial_path(&mut selected, &photos, Some(target)));
+        assert_eq!(selected, [Some(1), None]);
+        selected = [None; 2];
+        assert!(select_initial(&mut selected, &photos));
+        assert_eq!(selected, [Some(1), None]);
+    }
     #[test]
     fn file_sizes_use_readable_decimal_units() {
         for (bytes, expected) in [

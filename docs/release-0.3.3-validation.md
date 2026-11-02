@@ -7,8 +7,8 @@ the committed/tagged revision, with their own embedded provenance.
 | Check | Result |
 | --- | --- |
 | Formatting and diff whitespace | Passed |
-| Default-feature tests | 197 passed, 22 ignored |
-| No-default-feature tests | 185 passed, 18 ignored |
+| Default-feature tests | 203 passed, 22 ignored |
+| No-default-feature tests | 191 passed, 18 ignored |
 | Explicit native distance-0.05 JPEG XL roundtrip/corruption/invalidation | Passed |
 | Explicit native GPU/CPU comparisons | 3 passed |
 | Python CI provenance / JXL runtime / model guards | 6 / 13 / 3 passed |
@@ -21,7 +21,7 @@ defaults, foreign registrations, moved copies, edited commands, and refusal to
 remove a handler subsequently selected as a per-user default. Test registry trees
 are separate from production associations and are cleaned after each test.
 
-## Native Windows integration
+## Initial native Windows registration validation
 
 The real Settings **Register / Remove** buttons were exercised against the normal
 release EXE with an isolated settings profile. Startup and opening Settings did
@@ -55,7 +55,33 @@ dimensions match the earlier baseline. Source hashes for those files and size/
 mtime records for all **499** corpus files are unchanged. Exact decoder/runtime/
 model pins and default features remain unchanged.
 
-## Local build identity
+## Association launch and centered library selection
+
+The final association command is `"<absolute executable>" --open-with -- "%1"`.
+Isolated native registry tests validate its actual Windows argument parsing,
+including Unicode, spaces and shell metacharacters. The earlier production-key
+button/handler-enumeration test above used the initial command before this flag
+was added; it is not claimed as a new production-key test of the final command.
+The subsequently installed registration under `E:\Documents\AI\Scrutivue` was
+left unchanged, rather than replacing user work for another test.
+
+Native startup with the new association arguments and an isolated profile verified
+selection of a non-first requested image in Single mode, all three supported
+siblings in order, no nested image despite a saved recursive preference, and
+Left/Right/Home/End navigation. A control run confirmed that ordinary positional
+file startup still adds only that file. Source images and the user's profile
+remained unchanged. Scanner tests cover multiple batches, exact target selection,
+cancellation and invalid/missing/unsupported inputs.
+
+The final normal EXE was tested in real windows against a **260-file** folder.
+Requested indices **6** (already visible without scrolling) and **127** both
+centered the selected row within **2 physical pixels** of the library viewport
+center, measured from captured native screenshots. Startup uses strict centering
+and retries when discovery finishes; manual selection/navigation cancels pending
+automatic positioning. The two runs recorded 90 and 88 responsiveness probes,
+with no 100 ms timeouts. This verifies row placement, not input-to-screen latency.
+
+## Local build identities
 
 The prior normal EXE/runtime/model assets were preserved under
 `target/release-0.3.3-validation/previous-release-0.3.2/`. The new normal build
@@ -63,13 +89,20 @@ explicitly used the main checkout's pinned `vendor/libraw` through
 `DIFF_LIBRAW_SOURCE`; the EXE contains no experimental `AB_METRIC ` marker. Only
 the existing unused `crop`/`unpack` warnings remain.
 
-Local candidate: **37,673,472 bytes**, SHA-256:
+Initial cache/registration candidate: **37,673,472 bytes**, SHA-256:
 
 ```text
 d23833b1849fbe376d17a19c7b90baef533f2355a348bdfccb9b3c1ed08abc63
 ```
 
+Final folder-selection/centering candidate: **37,682,176 bytes**, SHA-256:
+
+```text
+96862c8940e87016bdeaf1b83b4eb436f7a5080b7ffead13e0bd6e589cd41570
+```
+
 This local EXE is **not substituted for the CI release archive**. Generated logs,
 native screenshots, frame probes and integration reports are under
-`target/release-0.3.3-validation/`; no generated EXE/DLL or evidence is committed.
+`target/release-0.3.3-validation/`, `target/open-with-folder-validation/` and
+`target/open-with-center-validation/`; no generated EXE/DLL or evidence is committed.
 Repository-root application binaries and the published 0.3.2 release are untouched.

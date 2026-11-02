@@ -30,6 +30,11 @@ pub enum Event {
         epoch: u64,
         roots: Vec<PathBuf>,
     },
+    OpenWithTarget {
+        epoch: u64,
+        scan: u64,
+        path: PathBuf,
+    },
     ScanDone {
         epoch: u64,
         scan: u64,
@@ -413,6 +418,11 @@ impl DecodeCache {
 }
 
 enum ScanJob {
+    OpenWith {
+        epoch: u64,
+        scan: u64,
+        path: PathBuf,
+    },
     Add {
         epoch: u64,
         scan: u64,
@@ -1023,6 +1033,15 @@ impl Services {
         });
         scan
     }
+    pub fn scan_open_with(&self, path: PathBuf) -> u64 {
+        let scan = self.next_scan.fetch_add(1, Ordering::Relaxed);
+        let _ = self.scans.send(ScanJob::OpenWith {
+            epoch: self.epoch(),
+            scan,
+            path,
+        });
+        scan
+    }
     pub fn refresh(&self, roots: Vec<PathBuf>, recursive: bool) {
         let _ = self.scans.send(ScanJob::Refresh {
             epoch: self.epoch(),
@@ -1054,6 +1073,41 @@ fn photo_metadata(path: &Path) -> std::io::Result<PhotoMetadata> {
 
 fn run_scan(job: ScanJob, tx: &Sender<Event>, current: &AtomicU64) {
     let (epoch, scan, paths, recursive, refreshing) = match job {
+        ScanJob::OpenWith { epoch, scan, path } => {
+            if current.load(Ordering::Acquire) != epoch {
+                return;
+            }
+            // Resolve the requested file and its parent on the scanner thread,
+            // never in startup's UI callback. The target precedes every batch.
+            let path = path.canonicalize().unwrap_or(path);
+            if model::supported(&path) && path.is_file() {
+                if let Some(parent) = path.parent().map(Path::to_path_buf) {
+                    if tx
+                        .send(Event::OpenWithTarget { epoch, scan, path })
+                        .is_err()
+                    {
+                        return;
+                    }
+                    run_scan(
+                        ScanJob::Add {
+                            epoch,
+                            scan,
+                            paths: vec![parent],
+                            recursive: false,
+                        },
+                        tx,
+                        current,
+                    );
+                    return;
+                }
+            }
+            let _ = tx.send(Event::ScanDone {
+                epoch,
+                scan,
+                skipped: 1,
+            });
+            return;
+        }
         ScanJob::Add {
             epoch,
             scan,
@@ -1903,6 +1957,135 @@ mod tests {
             }
             _ => panic!("expected refresh"),
         }
+    }
+    #[test]
+    fn open_with_scan_lists_sorted_siblings_and_selects_the_requested_late_batch_file() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "target/open-with-scan-tests/{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(root.join("nested")).unwrap();
+        for index in 0..130 {
+            std::fs::write(root.join(format!("image-{index:03}.png")), b"header only").unwrap();
+        }
+        let requested = root.join("zzz — 日本語 & 100%.PNG");
+        std::fs::write(&requested, b"header only").unwrap();
+        std::fs::write(root.join("ignored.txt"), b"not an image").unwrap();
+        std::fs::write(root.join("nested/hidden.png"), b"header only").unwrap();
+        let requested = requested.canonicalize().unwrap();
+        let expected_root = root.canonicalize().unwrap();
+        let (tx, rx) = unbounded();
+        run_scan(
+            ScanJob::OpenWith {
+                epoch: 9,
+                scan: 12,
+                path: requested.clone(),
+            },
+            &tx,
+            &AtomicU64::new(9),
+        );
+        let mut target = None;
+        let mut selected = [None; 2];
+        let mut photos = Vec::new();
+        let mut next = 1;
+        let mut batches = 0;
+        let mut done = false;
+        let mut roots = Vec::new();
+        for event in rx.try_iter() {
+            match event {
+                Event::OpenWithTarget { epoch, scan, path } => {
+                    assert_eq!((epoch, scan), (9, 12));
+                    assert_eq!(path, requested);
+                    assert_eq!(batches, 0);
+                    target = Some(path);
+                }
+                Event::Files { epoch, scan, files } => {
+                    assert_eq!((epoch, scan), (9, 12));
+                    assert!(target.is_some());
+                    batches += 1;
+                    merge_files(&mut photos, &mut next, files);
+                    model::select_initial_path(&mut selected, &photos, target.as_deref());
+                    if let Some(id) = selected[0] {
+                        assert_eq!(
+                            photos.iter().find(|photo| photo.id == id).unwrap().path,
+                            requested
+                        );
+                    }
+                }
+                Event::Roots { roots: added, .. } => roots.extend(added),
+                Event::ScanDone {
+                    epoch,
+                    scan,
+                    skipped,
+                } => {
+                    assert_eq!((epoch, scan, skipped), (9, 12, 0));
+                    done = true;
+                }
+                _ => panic!("unexpected association scan event"),
+            }
+        }
+        assert!(done && batches >= 2);
+        assert_eq!(photos.len(), 131);
+        assert_eq!(selected, [Some(photos.last().unwrap().id), None]);
+        assert_eq!(roots, [expected_root.clone()]);
+        assert!(photos
+            .iter()
+            .all(|photo| photo.roots.contains(&expected_root) && !photo.explicit));
+        let names: Vec<_> = photos.iter().map(|photo| photo.name.clone()).collect();
+        let mut sorted = names.clone();
+        sorted.sort();
+        assert_eq!(names, sorted);
+    }
+    #[test]
+    fn open_with_scan_rejects_directories_missing_and_unsupported_files_and_honors_cancellation() {
+        let root = PathBuf::from(env!("CARGO_MANIFEST_DIR")).join(format!(
+            "target/open-with-invalid-tests/{}-{}",
+            std::process::id(),
+            SystemTime::now()
+                .duration_since(SystemTime::UNIX_EPOCH)
+                .unwrap()
+                .as_nanos()
+        ));
+        std::fs::create_dir_all(&root).unwrap();
+        let unsupported = root.join("ignored.txt");
+        std::fs::write(&unsupported, b"untouched").unwrap();
+        for path in [root.clone(), root.join("missing.png"), unsupported.clone()] {
+            let (tx, rx) = unbounded();
+            run_scan(
+                ScanJob::OpenWith {
+                    epoch: 7,
+                    scan: 2,
+                    path,
+                },
+                &tx,
+                &AtomicU64::new(7),
+            );
+            assert!(matches!(
+                rx.try_recv().unwrap(),
+                Event::ScanDone {
+                    epoch: 7,
+                    scan: 2,
+                    skipped: 1
+                }
+            ));
+            assert!(rx.is_empty());
+        }
+        let (tx, rx) = unbounded();
+        run_scan(
+            ScanJob::OpenWith {
+                epoch: 7,
+                scan: 2,
+                path: root,
+            },
+            &tx,
+            &AtomicU64::new(8),
+        );
+        assert!(rx.is_empty());
+        assert_eq!(std::fs::read(unsupported).unwrap(), b"untouched");
     }
     #[test]
     fn recursive_addition_finds_nested_images_without_reading_pixels() {

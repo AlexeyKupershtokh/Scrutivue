@@ -26,7 +26,7 @@ mod windows_integration;
 
 extern crate libz_sys;
 
-use clap::Parser;
+use clap::{CommandFactory, Parser};
 use gpui_kit::{px, size, App, AppContext, Bounds, WindowBounds, WindowOptions};
 use std::path::PathBuf;
 
@@ -38,6 +38,9 @@ use std::path::PathBuf;
 struct Args {
     /// Image paths and/or directories. Paths with spaces must be quoted.
     paths: Vec<PathBuf>,
+    /// Select one image and list its containing folder (used by Windows Open with).
+    #[arg(long, requires = "paths", conflicts_with_all = ["recursive", "benchmark", "probe", "statistics", "stream_probe", "stream_resume_probe", "stream_pair_probe"])]
+    open_with: bool,
     /// Include subdirectories (symbolic links are never followed).
     #[arg(short, long)]
     recursive: bool,
@@ -82,8 +85,47 @@ struct Args {
     metric_edge: u32,
 }
 
+#[cfg(test)]
+mod argument_tests {
+    use super::*;
+
+    #[test]
+    fn association_argument_preserves_the_exact_unicode_path_after_the_separator() {
+        let path = r"C:\Photos — 日本語 & 100%\--gain.NEF";
+        let args = Args::try_parse_from(["scrutivue", "--open-with", "--", path]).unwrap();
+        assert!(args.open_with);
+        assert_eq!(args.paths, [PathBuf::from(path)]);
+        assert!(!args.recursive);
+        assert!(!Args::try_parse_from(["scrutivue", path]).unwrap().open_with);
+    }
+
+    #[test]
+    fn association_mode_requires_a_path_and_does_not_mix_with_recursive_or_cli_probes() {
+        assert!(Args::try_parse_from(["scrutivue", "--open-with"]).is_err());
+        for option in [
+            "--recursive",
+            "--probe",
+            "--benchmark",
+            "--statistics",
+            "--stream-probe",
+        ] {
+            assert!(
+                Args::try_parse_from(["scrutivue", "--open-with", option, "image.png"]).is_err()
+            );
+        }
+    }
+}
+
 fn main() {
     let args = Args::parse();
+    if args.open_with && args.paths.len() != 1 {
+        Args::command()
+            .error(
+                clap::error::ErrorKind::WrongNumberOfValues,
+                "--open-with requires exactly one image file",
+            )
+            .exit();
+    }
     #[cfg(feature = "experimental-nef-progressive")]
     nef_preview::trace::init();
     #[cfg(feature = "experimental-nef-progressive")]
@@ -275,6 +317,7 @@ fn main() {
                     cx.new(|cx| {
                         ui::Desk::new(
                             args.paths,
+                            args.open_with,
                             args.recursive,
                             args.cpu,
                             cache,

@@ -85,6 +85,7 @@ pub struct Desk {
     photos: Vec<Photo>,
     directory_roots: HashSet<PathBuf>,
     auto_select_scans: HashSet<u64>,
+    initial_path: Option<(u64, PathBuf)>,
     refreshing: bool,
     indices: HashMap<PhotoId, usize>,
     next_id: PhotoId,
@@ -165,6 +166,7 @@ pub struct Desk {
 impl Desk {
     pub fn new(
         paths: Vec<PathBuf>,
+        open_with: bool,
         recursive: bool,
         cpu: bool,
         cache: PathBuf,
@@ -179,7 +181,12 @@ impl Desk {
         let (settings_sender, settings_commands) = crossbeam_channel::bounded(8);
         let mut auto_select_scans = HashSet::new();
         if !paths.is_empty() {
-            auto_select_scans.insert(services.scan(paths, recursive));
+            let scan = if open_with {
+                services.scan_open_with(paths.into_iter().next().unwrap())
+            } else {
+                services.scan(paths, recursive)
+            };
+            auto_select_scans.insert(scan);
         }
         let scanning = auto_select_scans.len();
         let radius = cx.new(|_| {
@@ -235,6 +242,7 @@ impl Desk {
             photos: Vec::new(),
             directory_roots: HashSet::new(),
             auto_select_scans,
+            initial_path: None,
             refreshing: false,
             indices: HashMap::new(),
             next_id: 1,
@@ -593,12 +601,34 @@ impl Desk {
                 Event::Roots { epoch, roots } if epoch == self.services.epoch() => {
                     self.directory_roots.extend(roots);
                 }
+                Event::OpenWithTarget { epoch, scan, path } if epoch == self.services.epoch() => {
+                    if self.auto_select_scans.contains(&scan) {
+                        self.initial_path = Some((scan, path));
+                    }
+                }
                 Event::Files { epoch, scan, files } if epoch == self.services.epoch() => {
                     let change = services::merge_files(&mut self.photos, &mut self.next_id, files);
                     let mut selection_changed = self.apply_library_change(change);
                     if self.auto_select_scans.contains(&scan) {
-                        selection_changed |=
-                            model::select_initial(&mut self.selected, &self.photos);
+                        let preferred = self
+                            .initial_path
+                            .as_ref()
+                            .filter(|(target_scan, _)| *target_scan == scan)
+                            .map(|(_, path)| path.as_path());
+                        let initial_changed = if preferred.is_some() {
+                            model::select_initial_path(&mut self.selected, &self.photos, preferred)
+                        } else {
+                            model::select_initial(&mut self.selected, &self.photos)
+                        };
+                        if initial_changed && preferred.is_some() {
+                            self.focused_photo = self.selected[0];
+                            if let Some(index) =
+                                self.focused_photo.and_then(|id| self.indices.get(&id))
+                            {
+                                center_open_with_row(&self.scroll, *index);
+                            }
+                        }
+                        selection_changed |= initial_changed;
                     }
                     if selection_changed {
                         self.selection_changed();
@@ -609,7 +639,25 @@ impl Desk {
                     scan,
                     skipped,
                 } if epoch == self.services.epoch() => {
-                    self.auto_select_scans.remove(&scan);
+                    let auto_select = self.auto_select_scans.remove(&scan);
+                    if let Some((_, path)) = self
+                        .initial_path
+                        .as_ref()
+                        .filter(|(target_scan, _)| *target_scan == scan)
+                    {
+                        // Earlier batches may not contain enough following rows
+                        // to center the target. Retry with the complete list,
+                        // unless the user has taken over selection/navigation.
+                        if auto_select {
+                            if let Some(index) = self.selected[0]
+                                .and_then(|id| self.indices.get(&id))
+                                .filter(|index| self.photos[**index].path == *path)
+                            {
+                                center_open_with_row(&self.scroll, *index);
+                            }
+                        }
+                        self.initial_path = None;
+                    }
                     self.scanning = self.scanning.saturating_sub(1);
                     if skipped > 0 {
                         self.message =
@@ -1147,6 +1195,7 @@ impl Desk {
         self.photos.clear();
         self.directory_roots.clear();
         self.auto_select_scans.clear();
+        self.initial_path = None;
         self.refreshing = false;
         self.indices.clear();
         self.selected = [None; 2];
@@ -3047,6 +3096,11 @@ impl Render for Desk {
     }
 }
 
+fn center_open_with_row(scroll: &UniformListScrollHandle, index: usize) {
+    // Non-strict scrolling would leave an already visible row off-center.
+    scroll.scroll_to_item_strict(index, ScrollStrategy::Center);
+}
+
 fn camera_render_due(last_change: Option<Instant>, now: Instant) -> bool {
     last_change.is_some_and(|time| now.saturating_duration_since(time) >= CAMERA_IDLE)
 }
@@ -3330,12 +3384,25 @@ impl Render for DragPhoto {
 #[cfg(test)]
 mod tests {
     use super::{
-        accepts_snapshot, camera_render_due, neighbor_prefetch_allowed, right_clip,
-        transformed_image_bounds, RenderContent, CAMERA_IDLE,
+        accepts_snapshot, camera_render_due, center_open_with_row, neighbor_prefetch_allowed,
+        right_clip, transformed_image_bounds, RenderContent, CAMERA_IDLE,
     };
     use crate::model::{Mode, Settings, ViewportTransform};
-    use gpui_kit::{point, px, size, Bounds};
+    use gpui_kit::{point, px, size, Bounds, ScrollStrategy, UniformListScrollHandle};
     use std::time::{Duration, Instant};
+    #[test]
+    fn association_scroll_centers_even_when_the_requested_row_is_already_visible() {
+        let scroll = UniformListScrollHandle::new();
+        for index in [6, 127] {
+            center_open_with_row(&scroll, index);
+            let state = scroll.0.borrow();
+            let request = state.deferred_scroll_to_item.as_ref().unwrap();
+            assert_eq!(request.item_index, index);
+            assert_eq!(request.strategy, ScrollStrategy::Center);
+            assert!(request.scroll_strict);
+            assert_eq!(request.offset, 0);
+        }
+    }
     #[test]
     fn neighbors_require_explicit_prefetch_and_statistics_have_priority() {
         for selected in [[None, None], [Some(1), None], [None, Some(2)]] {

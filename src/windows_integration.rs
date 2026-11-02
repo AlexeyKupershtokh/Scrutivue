@@ -84,7 +84,7 @@ impl Registration {
         let command = [
             vec![b'"' as u16],
             exe.clone(),
-            "\" -- \"%1\"".encode_utf16().collect(),
+            "\" --open-with -- \"%1\"".encode_utf16().collect(),
         ]
         .concat();
         Ok(Self {
@@ -576,18 +576,13 @@ mod tests {
             let registration =
                 Registration::new("test".into(), "test-choices".into(), Path::new(path)).unwrap();
             let file = r"C:\Photos\--gain & 日本語 %.NEF";
-            let command = [
-                vec![b'"' as u16],
-                registration.exe.clone(),
-                "\" -- \"".encode_utf16().collect(),
-                wide(file),
-                vec![b'"' as u16, 0],
-            ]
-            .concat();
+            let mut command = registration.command[..registration.command.len() - 3].to_vec();
+            command.extend(wide(file));
+            command.extend([b'"' as u16, 0]);
             let mut count = 0;
             let argv = unsafe { CommandLineToArgvW(command.as_ptr(), &mut count) };
             assert!(!argv.is_null());
-            assert_eq!(count, 3);
+            assert_eq!(count, 4);
             let values: Vec<Vec<u16>> = (0..count as usize)
                 .map(|index| unsafe {
                     let value = *argv.add(index);
@@ -601,7 +596,15 @@ mod tests {
             unsafe {
                 LocalFree(argv.cast());
             }
-            assert_eq!(values, [registration.exe, wide("--"), wide(file)]);
+            assert_eq!(
+                values,
+                [
+                    registration.exe,
+                    wide("--open-with"),
+                    wide("--"),
+                    wide(file)
+                ]
+            );
         }
         assert!(Registration::new(
             "test".into(),

@@ -20,8 +20,13 @@
 - Add **Settings → Windows Open with → Register / Remove** for all 27 supported
   extensions. Registration is explicit, per-user and administrator-free; startup
   never registers automatically and default apps are not changed. Register again
-  after moving the portable folder. Unrelated registrations and manually changed
-  commands are protected.
+  after moving or updating the portable folder. Unrelated registrations and manually changed
+   commands are protected.
+- Opening through the registered Windows association selects the requested image
+  in Single mode and lists its supported siblings in file-name order, without
+  scanning subfolders. The selected row is centered in the library, including
+  after batched discovery; ordinary navigation keeps its existing behavior.
+  Older registrations need one explicit **Register** to refresh the launch command.
 - Produce versioned portable archives, checksums and clean-commit/build-run
   provenance in the manual Windows CI workflow. Release assets come from the
   successful CI run, without substituting a local rebuild.
