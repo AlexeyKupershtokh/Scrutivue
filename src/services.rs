@@ -104,7 +104,6 @@ impl<T: Send + 'static> Mailbox<T> {
         }
         value.take().unwrap()
     }
-    #[cfg(feature = "experimental-nef-progressive")]
     pub fn try_take(&self) -> Option<T> {
         self.value.lock().unwrap().take()
     }
@@ -120,6 +119,7 @@ pub struct RenderRequest {
     pub settings: Settings,
 }
 pub struct Services {
+    pub preview_cache: Arc<crate::cache::Worker>,
     #[cfg(feature = "experimental-nef-progressive")]
     pub nef_preview: crate::nef_preview::Worker,
     pub events: Receiver<Event>,
@@ -246,6 +246,7 @@ struct DecodeCounters {
     cancelled: AtomicU64,
 }
 struct DecodeCache {
+    budget: AtomicU64,
     frames: Mutex<LruCache<SourceKey, Arc<Frame>>>,
     protected: Mutex<HashSet<PathBuf>>,
     loading: Mutex<HashSet<SourceKey>>,
@@ -255,6 +256,7 @@ struct DecodeCache {
 impl DecodeCache {
     fn new() -> Self {
         Self {
+            budget: AtomicU64::new(1024 * 1024 * 1024),
             // Evict explicitly so speculative neighbors cannot evict A/B.
             frames: Mutex::new(LruCache::unbounded()),
             protected: Mutex::new(HashSet::new()),
@@ -303,7 +305,7 @@ impl DecodeCache {
         Self::trim(
             &mut cache,
             &self.protected.lock().unwrap(),
-            1024 * 1024 * 1024,
+            self.budget.load(Ordering::Acquire) as usize,
             &mut evicted,
         );
         drop(cache);
@@ -382,7 +384,7 @@ impl DecodeCache {
             Self::trim(
                 &mut cache,
                 &self.protected.lock().unwrap(),
-                1024 * 1024 * 1024,
+                self.budget.load(Ordering::Acquire) as usize,
                 &mut evicted,
             );
         }
@@ -396,10 +398,7 @@ impl DecodeCache {
         budget: usize,
         evicted: &mut Vec<Arc<Frame>>,
     ) {
-        while cache.len() > 6
-            || (cache.len() > 2
-                && cache.iter().map(|(_, frame)| frame.bytes()).sum::<usize>() > budget)
-        {
+        while cache.iter().map(|(_, frame)| frame.bytes()).sum::<usize>() > budget {
             let oldest = cache
                 .iter()
                 .rev()
@@ -427,6 +426,7 @@ enum ScanJob {
     },
 }
 enum Garbage {
+    ConfigureCache(usize),
     Frames(Vec<Arc<Frame>>),
     Images(Vec<Arc<RenderImage>>),
     Event(Event),
@@ -592,6 +592,13 @@ fn render_plan(settings: &Settings) -> (Settings, bool) {
 
 impl Services {
     pub fn new(force_cpu: bool, cache_dir: PathBuf) -> Self {
+        Self::with_cache(force_cpu, cache_dir, crate::cache::CacheSettings::default())
+    }
+    pub fn with_cache(
+        force_cpu: bool,
+        cache_dir: PathBuf,
+        config: crate::cache::CacheSettings,
+    ) -> Self {
         #[cfg(feature = "experimental-nef-progressive")]
         let nef_preview = crate::nef_preview::Worker::new();
         let (sender, events) = bounded(64);
@@ -601,6 +608,19 @@ impl Services {
         // One shared budget for BOTH full-frame workers, not six threads each.
         // Leave half the logical CPUs available for input, rendering and IO.
         let decode_pool = heavy_pool("decode-cpu", 2, 6);
+        let cache = Arc::new(DecodeCache::new());
+        cache
+            .budget
+            .store(config.full_bytes() as u64, Ordering::Release);
+        let (loader_cache, loader_pool) = (cache.clone(), decode_pool.clone());
+        let preview_cache = Arc::new(crate::cache::Worker::new(
+            config,
+            Arc::new(move |path, cancelled| {
+                loader_cache.load(path, cancelled, |source| {
+                    loader_pool.install(|| decode::decode_cancellable(source, cancelled))
+                })
+            }),
+        ));
         let thumbnail_pool = heavy_pool("thumbnail-cpu", usize::MAX, 1);
         let mailbox = renders.clone();
         let tx = sender.clone();
@@ -693,8 +713,8 @@ impl Services {
             .expect("render thread");
 
         let decode_jobs = Arc::new((Mutex::new(DecodeQueue::default()), Condvar::new()));
-        let cache = Arc::new(DecodeCache::new());
         let (retire, garbage) = unbounded();
+        let cache_previews = preview_cache.clone();
         let retiring_cache = cache.clone();
         let cache_events = sender.clone();
         let cache_epoch = epoch.clone();
@@ -703,11 +723,23 @@ impl Services {
             .spawn(move || {
                 while let Ok(garbage) = garbage.recv() {
                     match garbage {
+                        Garbage::ConfigureCache(bytes) => {
+                            retiring_cache.budget.store(bytes as u64, Ordering::Release);
+                            let mut retired = Vec::new();
+                            DecodeCache::trim(
+                                &mut retiring_cache.frames.lock().unwrap(),
+                                &retiring_cache.protected.lock().unwrap(),
+                                bytes,
+                                &mut retired,
+                            );
+                            drop(retired);
+                        }
                         Garbage::Frames(frames) => drop(frames),
                         Garbage::Images(images) => drop(images),
                         Garbage::Event(event) => drop(event),
                         Garbage::CacheFrame(path, metadata, frame) => {
-                            retiring_cache.remember(&path, &metadata, frame)
+                            retiring_cache.remember(&path, &metadata, frame.clone());
+                            cache_previews.offer(path, &metadata, frame);
                         }
                         Garbage::LookupFrame(epoch, id, path) => {
                             if cache_epoch.load(Ordering::Acquire) == epoch {
@@ -729,6 +761,7 @@ impl Services {
             let cache = cache.clone();
             let epoch = epoch.clone();
             let pool = decode_pool.clone();
+            let cache_previews = preview_cache.clone();
             #[cfg(feature = "experimental-nef-progressive")]
             let preview = nef_preview.publisher();
             thread::Builder::new()
@@ -744,6 +777,7 @@ impl Services {
                         }
                     };
                     let cancelled = || cancel.load(Ordering::Acquire);
+                    let source_revision = SourceKey::read(&path).ok();
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         cache.load(&path, &cancelled, |source| {
                             #[cfg(feature = "experimental-nef-progressive")]
@@ -782,6 +816,20 @@ impl Services {
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("Image decoder failed unexpectedly")))
                     .map_err(|e| format!("{}: {e:#}", path.display()));
+                    if let (Ok(frame), Some(source)) = (&result, source_revision) {
+                        if !cancelled() {
+                            cache_previews.offer(
+                                path.clone(),
+                                &PhotoMetadata {
+                                    bytes: source.bytes,
+                                    modified: source.modified,
+                                    created: source.created,
+                                    dimensions: Some(frame.size()),
+                                },
+                                frame.clone(),
+                            );
+                        }
+                    }
                     let target = jobs.0.lock().unwrap().complete(&path, &cancel);
                     #[cfg(feature = "experimental-nef-progressive")]
                     if result.is_err() {
@@ -810,13 +858,19 @@ impl Services {
                 .expect("decode thread");
         }
         let (thumbnails, jobs) = bounded::<(u64, PhotoId, PathBuf)>(4);
-        let disk = Arc::new(ThumbnailCache::new(cache_dir));
+        let disk = Arc::new(std::sync::OnceLock::<ThumbnailCache>::new());
         let prune = disk.clone();
-        thread::spawn(move || prune.prune());
+        let initial_directory = cache_dir.clone();
+        thread::spawn(move || {
+            prune
+                .get_or_init(|| ThumbnailCache::new(initial_directory))
+                .prune()
+        });
         for index in 0..2 {
             let jobs = jobs.clone();
             let tx = sender.clone();
             let disk = disk.clone();
+            let directory = cache_dir.clone();
             let epoch = epoch.clone();
             let pool = thumbnail_pool.clone();
             thread::Builder::new()
@@ -828,7 +882,10 @@ impl Services {
                             continue;
                         }
                         let result = pool
-                            .install(|| disk.get(&path))
+                            .install(|| {
+                                disk.get_or_init(|| ThumbnailCache::new(directory.clone()))
+                                    .get(&path)
+                            })
                             .map(|image| {
                                 let (width, height) = image.dimensions();
                                 let mut pixels = image.into_raw();
@@ -846,7 +903,7 @@ impl Services {
                         }
                         written += 1;
                         if written % 256 == 0 {
-                            disk.prune();
+                            disk.get().unwrap().prune();
                         }
                     }
                 })
@@ -864,6 +921,7 @@ impl Services {
             })
             .expect("library scan thread");
         Self {
+            preview_cache,
             events,
             #[cfg(feature = "experimental-nef-progressive")]
             nef_preview,
@@ -892,6 +950,7 @@ impl Services {
         self.epoch.load(Ordering::Acquire)
     }
     pub fn clear(&self) {
+        self.preview_cache.cancel();
         self.epoch.fetch_add(1, Ordering::AcqRel);
         self.decode_jobs.0.lock().unwrap().clear();
         self.decode_cache.protected.lock().unwrap().clear();
@@ -907,6 +966,12 @@ impl Services {
     }
     pub fn remember_frame(&self, path: PathBuf, metadata: PhotoMetadata, frame: Arc<Frame>) {
         let _ = self.retire.send(Garbage::CacheFrame(path, metadata, frame));
+    }
+    pub fn configure_cache(&self, config: crate::cache::CacheSettings) {
+        let _ = self
+            .retire
+            .send(Garbage::ConfigureCache(config.full_bytes()));
+        self.preview_cache.configure(config);
     }
     pub fn lookup_frame(&self, id: PhotoId, path: PathBuf) {
         let _ = self

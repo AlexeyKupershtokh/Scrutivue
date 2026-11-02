@@ -85,7 +85,13 @@ fn interpolate(x: f32, y: f32, zoom: [f32; 2], read: impl Fn(i32, i32, usize) ->
         top * (1.0 - fy) + bottom * fy
     })
 }
-fn sample(frame: &Frame, filtered: Option<&[f32]>, x: f32, y: f32, zoom: [f32; 2]) -> [f32; 3] {
+pub(crate) fn sample(
+    frame: &Frame,
+    filtered: Option<&[f32]>,
+    x: f32,
+    y: f32,
+    zoom: [f32; 2],
+) -> [f32; 3] {
     let read = |x: i32, y: i32, c: usize| {
         let index = (y.clamp(0, frame.height as i32 - 1) as usize * frame.width as usize
             + x.clamp(0, frame.width as i32 - 1) as usize)

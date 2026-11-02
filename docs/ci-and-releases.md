@@ -119,6 +119,31 @@ Windows portable ZIP.
 
 ## Scrutivue release process
 
+### 0.3.3 CI-built distribution
+
+For 0.3.3, the approved release path uses the **actual Windows CI artifact**, not
+a local rebuild. Push the reviewed commit and annotated version tag, then manually
+dispatch `windows.yml` against that tag. Verify the successful run's `headSha`
+matches the tag's commit before downloading `Scrutivue-windows-x64`.
+
+`scripts/package_ci_release.py` requires a clean GitHub Actions checkout matching
+`GITHUB_SHA` and an executable whose version matches `Cargo.toml`. It invokes the
+portable packager and extracted-package smoke checks, then provides:
+
+- `Scrutivue-<version>-windows-x64.zip`;
+- `release.json`, recording source commit, compiler, feature policy, dependency
+  pins, executable identity and Actions run URL;
+- `SHA256SUMS.txt`, covering both files above.
+
+The ZIP embeds the same JSON at `Scrutivue/build-info/release.json`. Download and
+verify these files, create an unpublished draft with `--verify-tag`, and attach
+the exact CI assets without repacking them. Download-test the draft assets before
+review/publication. The workflow remains manual-only with read-only repository
+permissions; creating the draft is a separate explicitly authorized operation.
+Native GPU/GUI results are local checks, not claims about the headless runner.
+
+### Historical local-build path
+
 Start with a manually approved **draft prerelease**, not an automatically published
 release on every push. Do not create a tag or public release without choosing a
 version and approval. The initial review created no release/tag; the owner later

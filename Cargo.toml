@@ -1,6 +1,6 @@
 [package]
 name = "scrutivue"
-version = "0.3.2"
+version = "0.3.3"
 edition = "2021"
 description = "Scrutivue — a GPU-assisted photograph and RAW comparison viewer"
 license = "MIT"

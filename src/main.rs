@@ -1,4 +1,5 @@
 mod benchmark;
+mod cache;
 mod color;
 mod decode;
 mod dng;
@@ -17,8 +18,11 @@ mod platform;
 mod preferences;
 mod processing;
 mod services;
+mod settings_window;
 mod streaming;
 mod ui;
+#[cfg(windows)]
+mod windows_integration;
 
 extern crate libz_sys;
 

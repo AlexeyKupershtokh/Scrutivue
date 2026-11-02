@@ -244,6 +244,16 @@ impl Camera {
             size: prepared_viewport.map(|v| v as f32 * ratio),
         }
     }
+    /// Place a complete source texture using original geometry, independently
+    /// of rounded preview dimensions. GPUI performs scaling and clipping.
+    pub fn source_transform(&self, image: [u32; 2], viewport: [u32; 2]) -> ViewportTransform {
+        let scale = self.scale(image, viewport);
+        let size = image.map(|edge| edge as f32 * scale);
+        ViewportTransform {
+            origin: std::array::from_fn(|i| viewport[i] as f32 * 0.5 - self.center[i] * size[i]),
+            size,
+        }
+    }
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -276,40 +286,19 @@ impl Default for Settings {
     }
 }
 
+pub const SUPPORTED_EXTENSIONS: &[&str] = &[
+    "jpg", "jpeg", "png", "tif", "tiff", "webp", "bmp", "exr", "nef", "nrw", "arw", "cr2", "cr3",
+    "crw", "dng", "raf", "rw2", "orf", "pef", "srw", "3fr", "fff", "iiq", "rwl", "raw", "mos",
+    "mrw",
+];
+
 pub fn supported(path: &Path) -> bool {
     path.extension()
         .and_then(|x| x.to_str())
-        .map(|x| {
-            matches!(
-                x.to_ascii_lowercase().as_str(),
-                "jpg"
-                    | "jpeg"
-                    | "png"
-                    | "tif"
-                    | "tiff"
-                    | "webp"
-                    | "bmp"
-                    | "exr"
-                    | "nef"
-                    | "nrw"
-                    | "arw"
-                    | "cr2"
-                    | "cr3"
-                    | "crw"
-                    | "dng"
-                    | "raf"
-                    | "rw2"
-                    | "orf"
-                    | "pef"
-                    | "srw"
-                    | "3fr"
-                    | "fff"
-                    | "iiq"
-                    | "rwl"
-                    | "raw"
-                    | "mos"
-                    | "mrw"
-            )
+        .map(|extension| {
+            SUPPORTED_EXTENSIONS
+                .iter()
+                .any(|supported| extension.eq_ignore_ascii_case(supported))
         })
         .unwrap_or(false)
 }
@@ -505,6 +494,35 @@ mod tests {
         assert_eq!(selected, [Some(2), Some(4)]);
         navigate_selection(&mut selected, 2);
         assert_eq!(selected, [Some(2), Some(4)]);
+    }
+    #[test]
+    fn source_texture_transform_preserves_original_geometry_across_zoom_pan_and_resize() {
+        for image in [[5520, 8280], [3292, 4940], [4940, 3292]] {
+            for viewport in [[3276, 2019], [1280, 720]] {
+                for zoom in [
+                    Zoom::Fit,
+                    Zoom::Fixed(0.5),
+                    Zoom::Fixed(1.),
+                    Zoom::Fixed(4.),
+                    Zoom::Fixed(8.),
+                ] {
+                    for center in [[0.5; 2], [0.2, 0.7], [0., 1.]] {
+                        let camera = Camera { zoom, center };
+                        let transform = camera.source_transform(image, viewport);
+                        let scale = camera.scale(image, viewport);
+                        for point in [[0., 0.], [0.17, 0.91], [0.5; 2], [1., 1.]] {
+                            for axis in 0..2 {
+                                let from_texture =
+                                    transform.origin[axis] + point[axis] * transform.size[axis];
+                                let from_original = viewport[axis] as f32 * 0.5
+                                    + (point[axis] - center[axis]) * image[axis] as f32 * scale;
+                                assert!((from_texture - from_original).abs() < 0.01);
+                            }
+                        }
+                    }
+                }
+            }
+        }
     }
     #[test]
     fn cursor_anchored_zoom() {

@@ -4,6 +4,9 @@
 use anyhow::{ensure, Context, Result};
 use sha2::{Digest, Sha256};
 use std::{ffi::c_void, path::Path, ptr::NonNull, sync::Arc};
+mod encode;
+pub use encode::encode_preview;
+pub(crate) use encode::{DISTANCE as PREVIEW_DISTANCE, EFFORT as PREVIEW_EFFORT};
 #[cfg(feature = "experimental-jxl-parallel")]
 mod parallel;
 

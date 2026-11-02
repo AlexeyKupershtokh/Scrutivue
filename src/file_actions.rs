@@ -132,7 +132,7 @@ fn open_directory(path: &Path) -> anyhow::Result<()> {
 }
 
 #[cfg(windows)]
-fn explorer_path(path: Vec<u16>) -> Vec<u16> {
+pub(crate) fn explorer_path(path: Vec<u16>) -> Vec<u16> {
     let extended: Vec<u16> = "\\\\?\\".encode_utf16().collect();
     let unc: Vec<u16> = "\\\\?\\UNC\\".encode_utf16().collect();
     if path.starts_with(&unc) {

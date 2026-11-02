@@ -24,6 +24,7 @@ pub struct Preferences {
     pub metrics_edge: u32,
     pub picker_enabled: bool,
     pub window_size: [f32; 2],
+    pub cache: crate::cache::CacheSettings,
 }
 impl Default for Preferences {
     fn default() -> Self {
@@ -42,11 +43,13 @@ impl Default for Preferences {
             metrics_edge: 1536,
             picker_enabled: false,
             window_size: [1500., 960.],
+            cache: crate::cache::CacheSettings::default(),
         }
     }
 }
 impl Preferences {
     fn validate(&mut self) {
+        self.cache.validate();
         let d = Self::default();
         if ![1, 4, 16, 64, 256].contains(&self.gain) {
             self.gain = d.gain;
@@ -268,6 +271,22 @@ mod tests {
         assert_eq!(p.split, 1.);
         assert_eq!(p.metrics_edge, 512);
         assert_eq!(finite_clamp(f32::NAN, 0., 1., 0.5), 0.5);
+    }
+    #[test]
+    fn old_settings_gain_cache_defaults_and_new_cache_options_roundtrip() {
+        let file = path("cache-old");
+        std::fs::create_dir_all(file.parent().unwrap()).unwrap();
+        std::fs::write(&file, br#"{"version":1,"gain":64}"#).unwrap();
+        let mut preferences = load(&file).unwrap();
+        assert_eq!(preferences.cache, crate::cache::CacheSettings::default());
+        preferences.cache.ram_mib = 8192;
+        preferences.cache.disk_mib = 2048;
+        preferences.cache.prefetch = true;
+        preferences.cache.build_all = true;
+        preferences.cache.disk_path =
+            PathBuf::from(env!("CARGO_MANIFEST_DIR")).join("target/custom-preview-cache");
+        save(&file, &preferences).unwrap();
+        assert_eq!(load(&file).unwrap(), preferences);
     }
     #[test]
     fn legacy_import_preserves_the_original_and_never_overrides_a_new_profile() {

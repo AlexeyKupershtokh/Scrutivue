@@ -72,6 +72,7 @@ struct DisplayedView {
     image_size: [u32; 2],
     content: RenderContent,
     generation: u64,
+    source_texture: bool,
 }
 
 pub struct Desk {
@@ -126,6 +127,14 @@ pub struct Desk {
     last_sigma_change: Option<Instant>,
     focus: FocusHandle,
     help_window: Option<AnyWindowHandle>,
+    settings_window: Option<AnyWindowHandle>,
+    settings_sender: crossbeam_channel::Sender<crate::settings_window::Command>,
+    settings_commands: crossbeam_channel::Receiver<crate::settings_window::Command>,
+    cache_settings: crate::cache::CacheSettings,
+    cached_preview_pair: Option<[PhotoId; 2]>,
+    cache_done: HashSet<PhotoId>,
+    cache_pending: Option<PhotoId>,
+    cache_cursor: usize,
     library_open: bool,
     metrics_open: bool,
     metrics_worker: metrics::Worker,
@@ -166,7 +175,8 @@ impl Desk {
         cx: &mut Context<Self>,
     ) -> Self {
         let recursive = recursive || prefs.recursive;
-        let services = Services::new(cpu, cache);
+        let services = Services::with_cache(cpu, cache, prefs.cache.clone());
+        let (settings_sender, settings_commands) = crossbeam_channel::bounded(8);
         let mut auto_select_scans = HashSet::new();
         if !paths.is_empty() {
             auto_select_scans.insert(services.scan(paths, recursive));
@@ -199,6 +209,9 @@ impl Desk {
                 this.preferences.flush(this.preference_snapshot());
                 if let Some(help) = this.help_window.take() {
                     let _ = help.update(cx, |_, window, _| window.remove_window());
+                }
+                if let Some(settings) = this.settings_window.take() {
+                    let _ = settings.update(cx, |_, window, _| window.remove_window());
                 }
             });
             true
@@ -264,6 +277,14 @@ impl Desk {
             last_sigma_change: None,
             focus,
             help_window: None,
+            settings_window: None,
+            settings_sender,
+            settings_commands,
+            cache_settings: prefs.cache.clone(),
+            cached_preview_pair: None,
+            cache_done: HashSet::new(),
+            cache_pending: None,
+            cache_cursor: 0,
             library_open: prefs.library_open,
             metrics_open: prefs.metrics_open,
             metrics_worker: metrics::Worker::new(),
@@ -306,9 +327,26 @@ impl Desk {
             metrics_edge: self.metrics_edge,
             picker_enabled: self.picker_enabled,
             window_size: self.window_size,
+            cache: self.cache_settings.clone(),
         }
     }
     fn pump(&mut self, cx: &mut Context<Self>) {
+        while let Ok(command) = self.settings_commands.try_recv() {
+            match command {
+                crate::settings_window::Command::Apply(config) => {
+                    self.cache_settings = config.clone();
+                    self.services.configure_cache(config);
+                    self.cache_done.clear();
+                    self.cache_cursor = 0;
+                    self.schedule_decodes();
+                    self.request_render();
+                }
+                crate::settings_window::Command::ClearDisk => {
+                    self.services.preview_cache.clear_disk()
+                }
+            }
+            cx.notify();
+        }
         self.preferences.update(self.preference_snapshot());
         if let Ok(error) = self.preferences.errors.try_recv() {
             self.message = error;
@@ -339,7 +377,8 @@ impl Desk {
                 } if generation == self.generation
                     && self.selected[0] == Some(pair[0])
                     && self.selected[1].unwrap_or(pair[0]) == pair[1]
-                    && self.streaming_eligible() =>
+                    && self.streaming_eligible()
+                    && self.cached_preview_pair != Some(pair) =>
                 {
                     self.stream_sizes.insert(pair[0], size);
                     self.retire_views();
@@ -351,6 +390,7 @@ impl Desk {
                             image_size: size,
                             content,
                             generation,
+                            source_texture: false,
                         });
                     }
                     self.stream_status = status;
@@ -390,7 +430,10 @@ impl Desk {
                     self.services.retire_frames(vec![frame])
                 }
                 crate::streaming::Event::Progress { generation, status } => {
-                    if generation == self.generation && self.streaming_eligible() {
+                    if generation == self.generation
+                        && self.streaming_eligible()
+                        && self.cached_preview_pair.is_none()
+                    {
                         self.stream_status = status;
                     }
                 }
@@ -405,6 +448,73 @@ impl Desk {
                 }
             }
         }
+        while let Ok(event) = self.services.preview_cache.events.try_recv() {
+            match event {
+                crate::cache::Event::Snapshot(snapshot)
+                    if snapshot.generation == self.generation
+                        && self.selected[0] == Some(snapshot.pair[0])
+                        && self.selected[1].unwrap_or(snapshot.pair[0]) == snapshot.pair[1]
+                        && self.cached_preview_job().is_some() =>
+                {
+                    #[cfg(feature = "experimental-nef-progressive")]
+                    {
+                        crate::nef_preview::trace::record(
+                            "disk_preview_accepted",
+                            serde_json::json!({"generation":snapshot.generation,"pair":snapshot.pair}),
+                        );
+                        self.services.nef_preview.request(None);
+                    }
+                    self.cached_preview_pair = Some(snapshot.pair);
+                    self.stream_sizes.insert(snapshot.pair[0], snapshot.size);
+                    self.retire_views();
+                    self.primary = Some(snapshot.primary);
+                    self.alternate = snapshot.alternate;
+                    if let Some(content) = self.current_render_content() {
+                        self.displayed_view = Some(DisplayedView {
+                            settings: snapshot.settings,
+                            image_size: snapshot.size,
+                            content,
+                            generation: snapshot.generation,
+                            source_texture: true,
+                        });
+                    }
+                    self.stream_status =
+                        "Cached preview · 2560 px · exact tools wait for full development".into();
+                    self.rendering = true;
+                    changed = true;
+                }
+                crate::cache::Event::Snapshot(snapshot) => self.services.retire_images(
+                    std::iter::once(snapshot.primary)
+                        .chain(snapshot.alternate)
+                        .collect(),
+                ),
+                crate::cache::Event::Built { id, complete } => {
+                    #[cfg(feature = "experimental-nef-progressive")]
+                    crate::nef_preview::trace::record(
+                        "cache_preview_built",
+                        serde_json::json!({"id":id,"complete":complete}),
+                    );
+                    if self.cache_pending == Some(id) {
+                        self.cache_pending = None;
+                    }
+                    if complete && self.indices.contains_key(&id) {
+                        self.cache_done.insert(id);
+                    }
+                }
+                crate::cache::Event::Cleared(result) => {
+                    self.cache_done.clear();
+                    self.cache_cursor = 0;
+                    self.cached_preview_pair = None;
+                    self.message=match result {Ok(())=>"Disk preview cache cleared; source images and thumbnails were preserved".into(),Err(error)=>error};
+                    self.request_render();
+                    changed = true;
+                }
+                crate::cache::Event::Error(error) => {
+                    self.message = error;
+                    changed = true;
+                }
+            }
+        }
         #[cfg(feature = "experimental-nef-progressive")]
         while let Ok(snapshot) = self.services.nef_preview.events.try_recv() {
             if snapshot.generation == self.generation
@@ -412,6 +522,7 @@ impl Desk {
                 && self.selected[0] == Some(snapshot.pair[0])
                 && self.selected[1].unwrap_or(snapshot.pair[0]) == snapshot.pair[1]
                 && self.nef_preview_job().is_some()
+                && self.cached_preview_pair != Some(snapshot.pair)
             {
                 crate::nef_preview::trace::record(
                     "preview_accepted",
@@ -428,6 +539,7 @@ impl Desk {
                         image_size: snapshot.size,
                         content,
                         generation: snapshot.generation,
+                        source_texture: false,
                     });
                 }
                 self.stream_status = format!("NEF preview · 1:4 sampled bands · A {} / B {} pixels · exact tools wait for full development",
@@ -564,6 +676,16 @@ impl Desk {
                         Err(error) => {
                             self.message = error.clone();
                             self.decode_errors.insert(id, error);
+                            let busy = self.selected.iter().flatten().any(|selected| {
+                                !self.frames.contains_key(selected)
+                                    && !self.decode_errors.contains_key(selected)
+                            });
+                            self.services.preview_cache.request(None, busy);
+                            if self.cached_preview_pair.is_some() {
+                                self.retire_views();
+                                self.stream_status.clear();
+                                self.cached_preview_pair = None;
+                            }
                             #[cfg(feature = "experimental-nef-progressive")]
                             {
                                 self.services.nef_preview.request(None);
@@ -606,8 +728,11 @@ impl Desk {
                         image_size: self.image_size(),
                         content: self.render_content.unwrap(),
                         generation,
+                        source_texture: false,
                     });
                     self.elapsed_ms = elapsed.as_secs_f64() * 1000.;
+                    self.cached_preview_pair = None;
+                    self.stream_status.clear();
                     self.backend = backend;
                     self.rendering =
                         generation < self.generation || self.last_camera_change.is_some();
@@ -648,6 +773,7 @@ impl Desk {
             changed = true;
         }
         self.schedule_thumbnails();
+        self.schedule_cache_builds();
         self.schedule_metrics();
         changed |= self.schedule_navigator();
         if changed {
@@ -694,11 +820,16 @@ impl Desk {
             self.thumb_pending.remove(&id);
             self.thumb_done.remove(&id);
             self.thumb_errors.remove(&id);
+            self.cache_done.remove(&id);
+            if self.cache_pending == Some(id) {
+                self.cache_pending = None;
+            }
         }
         self.services.retire_frames(retired_frames);
         self.warm_cursor = self.warm_cursor.min(self.photos.len());
         if !change.replaced.is_empty() || !change.removed.is_empty() {
             self.warm_cursor = 0;
+            self.cache_cursor = 0;
         }
         self.reindex();
         before != self.selected
@@ -1028,6 +1159,10 @@ impl Desk {
         self.thumb_done.clear();
         self.thumb_errors.clear();
         self.warm_cursor = 0;
+        self.cache_done.clear();
+        self.cache_pending = None;
+        self.cache_cursor = 0;
+        self.cached_preview_pair = None;
         self.visible = 0..12;
         self.scroll = UniformListScrollHandle::new();
         self.rendering = false;
@@ -1081,6 +1216,71 @@ impl Desk {
         self.selected[0]
             .map(|a| RenderContent::new([a, self.selected[1].unwrap_or(a)], &self.settings))
     }
+    fn schedule_cache_builds(&mut self) {
+        if !self.cache_settings.build_all
+            || self.cache_pending.is_some()
+            || self.rendering
+            || self
+                .selected
+                .iter()
+                .flatten()
+                .any(|id| !self.frames.contains_key(id))
+        {
+            return;
+        }
+        while let Some(photo) = self.photos.get(self.cache_cursor) {
+            if self.cache_done.contains(&photo.id) {
+                self.cache_cursor += 1;
+                continue;
+            }
+            if self
+                .services
+                .preview_cache
+                .build(photo.id, photo.path.clone())
+            {
+                self.cache_pending = Some(photo.id);
+            }
+            break;
+        }
+    }
+    fn cached_preview_job(&self) -> Option<crate::streaming::Request> {
+        if self.settings.highpass || self.settings.mode == Mode::Diff {
+            return None;
+        }
+        let aid = self.selected[0]?;
+        let bid = self.selected[1].unwrap_or(aid);
+        if [aid, bid].iter().all(|id| self.frames.contains_key(id))
+            || [aid, bid]
+                .iter()
+                .any(|id| self.decode_errors.contains_key(id))
+        {
+            return None;
+        }
+        if [aid, bid].iter().any(|id| {
+            !self.frames.contains_key(id)
+                && self
+                    .indices
+                    .get(id)
+                    .and_then(|index| self.photos[*index].metadata.dimensions)
+                    .is_some_and(|size| !crate::cache::eligible(size))
+        }) {
+            return None;
+        }
+        let path = |id| {
+            self.indices
+                .get(&id)
+                .map(|index| self.photos[*index].path.clone())
+        };
+        Some(crate::streaming::Request {
+            generation: self.generation,
+            pair: [(aid, path(aid)?), (bid, path(bid)?)],
+            settings: self.settings.clone(),
+            ready: [
+                self.frames.get(&aid).cloned(),
+                self.frames.get(&bid).cloned(),
+            ],
+        })
+    }
     fn preview_camera_change(&mut self) {
         if self.selected[0].is_some() {
             self.settings
@@ -1126,6 +1326,15 @@ impl Desk {
     fn request_render(&mut self) {
         self.last_camera_change = None;
         self.generation += 1;
+        let busy = self
+            .selected
+            .iter()
+            .flatten()
+            .any(|id| !self.frames.contains_key(id));
+        self.services
+            .preview_cache
+            .request(self.cached_preview_job(), busy);
+        self.schedule_decodes();
         #[cfg(feature = "experimental-nef-progressive")]
         self.services.nef_preview.request(self.nef_preview_job());
         let content = self.current_render_content();
@@ -1182,6 +1391,7 @@ impl Desk {
         self.update_picker();
     }
     fn selection_changed(&mut self) {
+        self.cached_preview_pair = None;
         self.stream_status.clear();
         self.settings.mode = self.preferred_mode.effective(self.selected[1].is_some());
         self.reset_metrics();
@@ -1240,7 +1450,19 @@ impl Desk {
             .focused_photo
             .and_then(|id| self.indices.get(&id))
             .copied()
-            .filter(|_| !streaming && neighbor_prefetch_allowed(self.selected, self.metrics_open))
+            .filter(|_| {
+                (!streaming
+                    || self
+                        .selected
+                        .iter()
+                        .flatten()
+                        .all(|id| self.frames.contains_key(id)))
+                    && neighbor_prefetch_allowed(
+                        self.selected,
+                        self.metrics_open,
+                        self.cache_settings.prefetch,
+                    )
+            })
         {
             for neighbor in [index.checked_add(1), index.checked_sub(1)]
                 .into_iter()
@@ -1439,6 +1661,24 @@ impl Desk {
         match crate::help::open(cx) {
             Ok(handle) => self.help_window = Some(handle),
             Err(error) => self.message = format!("Could not open help: {error:#}"),
+        }
+    }
+    fn show_settings(&mut self, cx: &mut Context<Self>) {
+        if let Some(handle) = self.settings_window {
+            if handle
+                .update(cx, |_, window, _| window.activate_window())
+                .is_ok()
+            {
+                return;
+            }
+        }
+        match crate::settings_window::open(
+            self.cache_settings.clone(),
+            self.settings_sender.clone(),
+            cx,
+        ) {
+            Ok(handle) => self.settings_window = Some(handle),
+            Err(error) => self.message = format!("Could not open settings: {error:#}"),
         }
     }
     fn choose_mode(&mut self, mode: Mode, cx: &mut Context<Self>) {
@@ -1712,6 +1952,14 @@ impl Desk {
                     .tooltip("Comparison metrics and A/B noise estimates (S)")
                     .selected(self.metrics_open)
                     .on_click(cx.listener(|this, _, _, cx| this.toggle_metrics(cx))),
+            ))
+            .child(control(
+                Button::new("settings")
+                    .label("Settings")
+                    .small()
+                    .ghost()
+                    .tooltip("Memory, prefetch and disk preview cache settings")
+                    .on_click(cx.listener(|this, _, _, cx| this.show_settings(cx))),
             ))
             .child(control(
                 Button::new("help")
@@ -2347,12 +2595,18 @@ impl Desk {
         let a = displayed.and(self.primary.clone());
         let b = displayed.and(self.alternate.clone());
         let transform = displayed.map(|view| {
-            self.settings.camera.viewport_transform(
-                &view.settings.camera,
-                view.image_size,
-                self.settings.viewport,
-                view.settings.viewport,
-            )
+            if view.source_texture {
+                self.settings
+                    .camera
+                    .source_transform(view.image_size, self.settings.viewport)
+            } else {
+                self.settings.camera.viewport_transform(
+                    &view.settings.camera,
+                    view.image_size,
+                    self.settings.viewport,
+                    view.settings.viewport,
+                )
+            }
         });
         let display_scale = self.display_scale;
         let has_image = a.is_some();
@@ -2796,10 +3050,12 @@ impl Render for Desk {
 fn camera_render_due(last_change: Option<Instant>, now: Instant) -> bool {
     last_change.is_some_and(|time| now.saturating_duration_since(time) >= CAMERA_IDLE)
 }
-fn neighbor_prefetch_allowed(selected: [Option<PhotoId>; 2], statistics_open: bool) -> bool {
-    // A single RAW must not silently allocate a second full frame. Statistics
-    // also gets priority over speculative pair navigation.
-    selected.iter().all(Option::is_some) && !statistics_open
+fn neighbor_prefetch_allowed(
+    selected: [Option<PhotoId>; 2],
+    statistics_open: bool,
+    enabled: bool,
+) -> bool {
+    enabled && selected[0].is_some() && !statistics_open
 }
 fn map_bounds(origin: Point<Pixels>, rect: minimap::Rect) -> Bounds<Pixels> {
     Bounds {
@@ -3081,13 +3337,15 @@ mod tests {
     use gpui_kit::{point, px, size, Bounds};
     use std::time::{Duration, Instant};
     #[test]
-    fn single_selection_and_statistics_do_not_prefetch_full_resolution_neighbors() {
+    fn neighbors_require_explicit_prefetch_and_statistics_have_priority() {
         for selected in [[None, None], [Some(1), None], [None, Some(2)]] {
-            assert!(!neighbor_prefetch_allowed(selected, false));
-            assert!(!neighbor_prefetch_allowed(selected, true));
+            assert!(!neighbor_prefetch_allowed(selected, false, false));
+            assert!(!neighbor_prefetch_allowed(selected, true, true));
         }
-        assert!(neighbor_prefetch_allowed([Some(1), Some(2)], false));
-        assert!(!neighbor_prefetch_allowed([Some(1), Some(2)], true));
+        assert!(neighbor_prefetch_allowed([Some(1), Some(2)], false, true));
+        assert!(neighbor_prefetch_allowed([Some(1), None], false, true));
+        assert!(!neighbor_prefetch_allowed([Some(1), Some(2)], false, false));
+        assert!(!neighbor_prefetch_allowed([Some(1), Some(2)], true, true));
     }
     #[test]
     fn divider_clips_without_resizing_image() {
