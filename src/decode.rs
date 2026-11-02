@@ -11,6 +11,8 @@ mod nef_tests;
 mod parallel;
 #[cfg(test)]
 mod profile;
+#[cfg(feature = "experimental-nef-progressive")]
+pub(crate) mod progressive;
 
 #[derive(Debug)]
 pub struct Frame {
@@ -128,6 +130,21 @@ fn raw_cancellable(
     thumbnail: bool,
     cancelled: &(dyn Fn() -> bool + Sync),
 ) -> Result<DynamicImage> {
+    raw_with_progress(
+        path,
+        thumbnail,
+        cancelled,
+        #[cfg(feature = "experimental-nef-progressive")]
+        None,
+    )
+}
+
+fn raw_with_progress(
+    path: &Path,
+    thumbnail: bool,
+    cancelled: &(dyn Fn() -> bool + Sync),
+    #[cfg(feature = "experimental-nef-progressive")] progress: Option<&progressive::Progress<'_>>,
+) -> Result<DynamicImage> {
     let started = std::time::Instant::now();
     let file = std::fs::File::open(path).with_context(|| format!("Read {}", path.display()))?;
     // The mapped file outlives RawView. Thumbnail extraction faults in only the
@@ -155,18 +172,26 @@ fn raw_cancellable(
     let mut view = RawView::default();
     let mut error = [0i8; 512];
     let mut cancellation = Cancellation(cancelled);
-    let result = unsafe {
+    let open = |view: &mut RawView, error: &mut [c_char], cancellation: &mut Cancellation<'_>| unsafe {
         diff_raw_open_cancellable(
             bytes.as_ptr().cast(),
             bytes.len(),
             thumbnail as i32,
-            &mut view,
+            view,
             error.as_mut_ptr(),
             error.len(),
             check_cancel,
-            (&mut cancellation as *mut Cancellation<'_>).cast(),
+            (cancellation as *mut Cancellation<'_>).cast(),
         )
     };
+    #[cfg(feature = "experimental-nef-progressive")]
+    let result = if let Some(progress) = progress {
+        unsafe { progressive::open(bytes, &mut view, &mut error, &mut cancellation, progress) }
+    } else {
+        open(&mut view, &mut error, &mut cancellation)
+    };
+    #[cfg(not(feature = "experimental-nef-progressive"))]
+    let result = open(&mut view, &mut error, &mut cancellation);
     if result != 0 {
         bail!(
             "LibRaw: {}",

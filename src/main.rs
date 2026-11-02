@@ -10,6 +10,8 @@ mod lfu;
 mod metrics;
 mod minimap;
 mod model;
+#[cfg(feature = "experimental-nef-progressive")]
+mod nef_preview;
 mod noise;
 mod platform;
 mod preferences;
@@ -52,6 +54,10 @@ struct Args {
     /// Decode each path and its thumbnail, printing diagnostics without a window.
     #[arg(long)]
     probe: bool,
+    /// Profile early NEF bands and exact full-frame completion without a window.
+    #[cfg(feature = "experimental-nef-progressive")]
+    #[arg(long)]
+    nef_preview_probe: bool,
     /// Exercise visible DNG tiles, pan reuse and exact idle completion without a window.
     #[arg(long)]
     stream_probe: bool,
@@ -74,6 +80,26 @@ struct Args {
 
 fn main() {
     let args = Args::parse();
+    #[cfg(feature = "experimental-nef-progressive")]
+    nef_preview::trace::init();
+    #[cfg(feature = "experimental-nef-progressive")]
+    if args.nef_preview_probe {
+        let result = (|| -> anyhow::Result<_> {
+            anyhow::ensure!(
+                args.paths.len() == 1,
+                "A NEF preview probe requires exactly one input file"
+            );
+            nef_preview::probe(&args.paths[0], args.cpu)
+        })();
+        match result {
+            Ok(report) => println!("{}", serde_json::to_string_pretty(&report).unwrap()),
+            Err(error) => {
+                eprintln!("NEF preview probe failed: {error:#}");
+                std::process::exit(1);
+            }
+        }
+        return;
+    }
     if args.stream_resume_probe {
         let result = (|| -> anyhow::Result<_> {
             anyhow::ensure!(

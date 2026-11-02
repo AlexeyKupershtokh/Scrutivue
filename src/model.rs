@@ -179,24 +179,18 @@ impl Camera {
         }
         .clamp(Self::zoom_limits(image, viewport)[0], 8.)
     }
-    /// Project onto the nearest legal camera, independently on each image axis.
+    /// Keep the viewport centre inside the image at every zoom, including Fit.
+    /// Empty space around the edges is allowed so overlays need not hide detail.
     pub fn clamp(&mut self, image: [u32; 2], viewport: [u32; 2]) {
         let scale = self.scale(image, viewport);
         if matches!(self.zoom, Zoom::Fixed(_)) {
             self.zoom = Zoom::Fixed(scale);
         }
-        for i in 0..2 {
-            let extent = image[i].max(1) as f32 * scale;
-            self.center[i] = if extent <= viewport[i] as f32 {
-                0.5
+        for center in &mut self.center {
+            *center = if center.is_finite() {
+                center.clamp(0., 1.)
             } else {
-                let margin = viewport[i] as f32 / (2. * extent);
-                let center = if self.center[i].is_finite() {
-                    self.center[i]
-                } else {
-                    0.5
-                };
-                center.clamp(margin, 1. - margin)
+                0.5
             };
         }
     }
@@ -556,22 +550,32 @@ mod tests {
             center: [-3., 4.],
         };
         camera.clamp([2000, 400], [1000, 750]);
-        assert_eq!(camera.center, [0.25, 0.5]);
+        assert_eq!(camera.center, [0., 1.]);
         camera.center = [0.6, -10.];
         camera.clamp([2000, 400], [1000, 750]);
-        assert_eq!(camera.center, [0.6, 0.5]);
+        assert_eq!(camera.center, [0.6, 0.]);
         camera.center = [8., 0.];
         camera.clamp([2000, 400], [1000, 750]);
-        assert_eq!(camera.center, [0.75, 0.5]);
+        assert_eq!(camera.center, [1., 0.]);
     }
     #[test]
-    fn small_equal_and_fit_axes_cannot_be_panned() {
+    fn small_equal_and_fit_images_can_be_panned_without_changing_zoom() {
         let mut camera = Camera::default();
+        camera.pan([100., -75.], [2000, 1000], [1000, 750]);
+        assert_eq!(camera.center, [0.4, 0.65]);
+        assert_eq!(camera.zoom, Zoom::Fit);
         camera.pan([10000., -10000.], [2000, 1000], [1000, 750]);
-        assert_eq!(camera.center, [0.5, 0.5]);
+        assert_eq!(camera.center, [0., 1.]);
         camera.zoom = Zoom::Fixed(1.);
         camera.pan([-10000., 10000.], [1000, 400], [1000, 750]);
-        assert_eq!(camera.center, [0.5, 0.5]);
+        assert_eq!(camera.center, [1., 0.]);
+        assert_eq!(camera.zoom, Zoom::Fixed(1.));
+        camera.zoom = Zoom::Fixed(0.5);
+        camera.center = [0.5; 2];
+        camera.pan([50., 25.], [200, 100], [1000, 750]);
+        // The existing half-Fit minimum still applies to very small images.
+        assert_eq!(camera.center, [0.4, 0.4]);
+        assert_eq!(camera.zoom, Zoom::Fixed(2.5));
     }
     #[test]
     fn clamp_applies_after_pan_zoom_resize_and_new_image() {
@@ -582,20 +586,20 @@ mod tests {
             center: [0.5, 0.5],
         };
         camera.pan([1e6, -1e6], image, viewport);
-        assert_eq!(camera.center, [0.125, 0.875]);
+        assert_eq!(camera.center, [0., 1.]);
         camera.zoom_at(0.25, [1000., 0.], image, viewport);
-        assert_eq!(camera.center, [0.5, 0.5]);
+        assert_eq!(camera.center, [0., 1.]);
         camera.center = [0., 1.];
         camera.clamp(image, [2000, 1500]);
         assert_eq!(camera.zoom, Zoom::Fixed(0.25));
-        assert_eq!(camera.center, [0.5, 0.5]);
+        assert_eq!(camera.center, [0., 1.]);
         camera.zoom = Zoom::Fixed(2.);
         camera.center = [0.9, 0.1];
         camera.clamp([1000, 500], viewport);
-        assert_eq!(camera.center, [0.75, 0.375]);
+        assert_eq!(camera.center, [0.9, 0.1]);
     }
     #[test]
-    fn legal_camera_never_exposes_space_past_a_large_image_axis() {
+    fn viewport_centre_stays_inside_the_image_at_every_scale_and_size() {
         for image in [[4000, 3000], [400, 3000], [4000, 300], [1, 1]] {
             for viewport in [[1000, 750], [2000, 500]] {
                 for scale in [0.01, 0.5, 1., 8., 100.] {
@@ -608,13 +612,12 @@ mod tests {
                         let scale = camera.scale(image, viewport);
                         for i in 0..2 {
                             let extent = image[i] as f32 * scale;
-                            if extent <= viewport[i] as f32 {
-                                assert_eq!(camera.center[i], 0.5);
-                            } else {
-                                let left = viewport[i] as f32 * 0.5 - camera.center[i] * extent;
-                                assert!(left <= 0.001);
-                                assert!(left + extent >= viewport[i] as f32 - 0.001);
-                            }
+                            assert!((0. ..=1.).contains(&camera.center[i]));
+                            let middle = viewport[i] as f32 * 0.5;
+                            let left = middle - camera.center[i] * extent;
+                            assert!(left <= middle + 0.001);
+                            assert!(left + extent >= middle - 0.001);
+                            assert_eq!(camera.center[i], center[i].clamp(0., 1.));
                         }
                     }
                 }

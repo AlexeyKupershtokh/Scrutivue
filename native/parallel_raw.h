@@ -13,6 +13,9 @@ public:
     int get_decoder_info(libraw_decoder_info_t *info) override;
     libraw_processed_image_t *dcraw_make_mem_image(int *error = nullptr) override;
     static void test_kernels();
+    using Preview = void (*)(void *, const uint16_t *, uint32_t, uint32_t,
+                             uint32_t, uint32_t, uint32_t, uint32_t, uint32_t);
+    void set_preview(Preview callback, void *context, float center_x, float center_y);
 
 protected:
     void copy_bayer(unsigned short black[4], unsigned short *maximum) override;
@@ -23,6 +26,11 @@ protected:
 private:
     void load_nef_parallel();
     void check_cancelled() const;
+    bool preview_supported() const;
+    void emit_preview(unsigned first, unsigned end, const uint16_t *curve);
+    Preview preview_ = nullptr;
+    void *preview_context_ = nullptr;
+    float preview_center_[2]{0.5f, 0.5f};
     bool enabled_ = false;
     const uint8_t *strip_ = nullptr;
     size_t strip_size_ = 0;

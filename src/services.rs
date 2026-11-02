@@ -104,6 +104,10 @@ impl<T: Send + 'static> Mailbox<T> {
         }
         value.take().unwrap()
     }
+    #[cfg(feature = "experimental-nef-progressive")]
+    pub fn try_take(&self) -> Option<T> {
+        self.value.lock().unwrap().take()
+    }
 }
 pub enum RenderJob {
     Frame(RenderRequest),
@@ -116,6 +120,8 @@ pub struct RenderRequest {
     pub settings: Settings,
 }
 pub struct Services {
+    #[cfg(feature = "experimental-nef-progressive")]
+    pub nef_preview: crate::nef_preview::Worker,
     pub events: Receiver<Event>,
     sender: Sender<Event>,
     pub renders: Arc<Mailbox<RenderJob>>,
@@ -586,6 +592,8 @@ fn render_plan(settings: &Settings) -> (Settings, bool) {
 
 impl Services {
     pub fn new(force_cpu: bool, cache_dir: PathBuf) -> Self {
+        #[cfg(feature = "experimental-nef-progressive")]
+        let nef_preview = crate::nef_preview::Worker::new();
         let (sender, events) = bounded(64);
         let renders = Arc::new(Mailbox::<RenderJob>::new());
         let epoch = Arc::new(AtomicU64::new(0));
@@ -721,6 +729,8 @@ impl Services {
             let cache = cache.clone();
             let epoch = epoch.clone();
             let pool = decode_pool.clone();
+            #[cfg(feature = "experimental-nef-progressive")]
+            let preview = nef_preview.publisher();
             thread::Builder::new()
                 .name(format!("decode-{index}"))
                 .spawn(move || loop {
@@ -736,12 +746,49 @@ impl Services {
                     let cancelled = || cancel.load(Ordering::Acquire);
                     let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
                         cache.load(&path, &cancelled, |source| {
+                            #[cfg(feature = "experimental-nef-progressive")]
+                            if path
+                                .extension()
+                                .is_some_and(|extension| extension.eq_ignore_ascii_case("nef"))
+                            {
+                                if let Some((photo, center)) = preview.target(&path) {
+                                    let identity = SourceKey::read(source)?;
+                                    return pool.install(|| {
+                                        decode::progressive::decode(
+                                            source,
+                                            &cancelled,
+                                            &decode::progressive::Progress {
+                                                center,
+                                                emit: &|patch| {
+                                                    if !cancelled()
+                                                        && SourceKey::read(source).ok().as_ref()
+                                                            == Some(&identity)
+                                                    {
+                                                        preview.patch(
+                                                            photo,
+                                                            path.clone(),
+                                                            cancel.clone(),
+                                                            patch,
+                                                        );
+                                                    }
+                                                },
+                                            },
+                                        )
+                                    });
+                                }
+                            }
                             pool.install(|| decode::decode_cancellable(source, &cancelled))
                         })
                     }))
                     .unwrap_or_else(|_| Err(anyhow::anyhow!("Image decoder failed unexpectedly")))
                     .map_err(|e| format!("{}: {e:#}", path.display()));
                     let target = jobs.0.lock().unwrap().complete(&path, &cancel);
+                    #[cfg(feature = "experimental-nef-progressive")]
+                    if result.is_err() {
+                        // Revoke queued previews after complete() has retained
+                        // the authoritative decode error for the UI.
+                        cancel.store(true, Ordering::Release);
+                    }
                     jobs.1.notify_all();
                     if let Some(target) = target {
                         if epoch.load(Ordering::Acquire) != target.epoch {
@@ -818,6 +865,8 @@ impl Services {
             .expect("library scan thread");
         Self {
             events,
+            #[cfg(feature = "experimental-nef-progressive")]
+            nef_preview,
             sender,
             renders,
             decode_jobs,

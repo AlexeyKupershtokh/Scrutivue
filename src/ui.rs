@@ -34,6 +34,9 @@ const LINE: u32 = 0x353538;
 const TEXT: u32 = 0xe5e5e7;
 const MUTED: u32 = 0x939398;
 const CAMERA_IDLE: Duration = Duration::from_millis(10);
+const STATISTICS_WIDTH: f32 = 288.;
+const PICKER_SIZE: [f32; 2] = [424., 424.];
+const PICKER_SWATCH_HEIGHT: f32 = 56.;
 
 // Camera/viewport/split changes can reuse a render; source/filter changes cannot.
 #[derive(Clone, Copy, PartialEq, Eq)]
@@ -402,6 +405,43 @@ impl Desk {
                 }
             }
         }
+        #[cfg(feature = "experimental-nef-progressive")]
+        while let Ok(snapshot) = self.services.nef_preview.events.try_recv() {
+            if snapshot.generation == self.generation
+                && snapshot.is_valid()
+                && self.selected[0] == Some(snapshot.pair[0])
+                && self.selected[1].unwrap_or(snapshot.pair[0]) == snapshot.pair[1]
+                && self.nef_preview_job().is_some()
+            {
+                crate::nef_preview::trace::record(
+                    "preview_accepted",
+                    serde_json::json!({"generation":snapshot.generation,
+                    "pair":snapshot.pair,"covered_sampled_pixels":snapshot.covered_pixels}),
+                );
+                self.stream_sizes.insert(snapshot.pair[0], snapshot.size);
+                self.retire_views();
+                self.primary = Some(snapshot.primary);
+                self.alternate = snapshot.alternate;
+                if let Some(content) = self.current_render_content() {
+                    self.displayed_view = Some(DisplayedView {
+                        settings: snapshot.settings,
+                        image_size: snapshot.size,
+                        content,
+                        generation: snapshot.generation,
+                    });
+                }
+                self.stream_status = format!("NEF preview · 1:4 sampled bands · A {} / B {} pixels · exact tools wait for full development",
+                    snapshot.covered_pixels[0], snapshot.covered_pixels[1]);
+                self.rendering = true;
+                changed = true;
+            } else {
+                self.services.retire_images(
+                    std::iter::once(snapshot.primary)
+                        .chain(snapshot.alternate)
+                        .collect(),
+                );
+            }
+        }
         while let Ok(update) = self.navigator_worker.events.try_recv() {
             if update.token == self.navigator_token {
                 if let Some(old) = self.navigator_image.replace(update.image) {
@@ -507,6 +547,11 @@ impl Desk {
                 Event::Decoded { id, result } if self.selected.contains(&Some(id)) => {
                     match result {
                         Ok(frame) => {
+                            #[cfg(feature = "experimental-nef-progressive")]
+                            crate::nef_preview::trace::record(
+                                "full_decoded",
+                                serde_json::json!({"id":id}),
+                            );
                             self.decode_errors.remove(&id);
                             if let Some(index) = self.indices.get(&id) {
                                 self.photos[*index].metadata.dimensions = Some(frame.size());
@@ -519,6 +564,14 @@ impl Desk {
                         Err(error) => {
                             self.message = error.clone();
                             self.decode_errors.insert(id, error);
+                            #[cfg(feature = "experimental-nef-progressive")]
+                            {
+                                self.services.nef_preview.request(None);
+                                if self.stream_status.starts_with("NEF preview") {
+                                    self.retire_views();
+                                    self.stream_status.clear();
+                                }
+                            }
                             self.rendering = false;
                         }
                     }
@@ -539,6 +592,12 @@ impl Desk {
                         self.displayed_view.as_ref().map(|view| view.generation),
                     ) =>
                 {
+                    #[cfg(feature = "experimental-nef-progressive")]
+                    crate::nef_preview::trace::record(
+                        "full_render_accepted",
+                        serde_json::json!({"generation":generation,
+                        "pair":self.selected,"render_ms":elapsed.as_secs_f64()*1000.}),
+                    );
                     self.retire_views();
                     self.primary = Some(primary);
                     self.alternate = alternate;
@@ -941,6 +1000,8 @@ impl Desk {
     }
     fn clear(&mut self, cx: &mut Context<Self>) {
         self.services.clear();
+        #[cfg(feature = "experimental-nef-progressive")]
+        self.services.nef_preview.request(None);
         self.streaming.clear();
         self.stream_fallback.clear();
         self.stream_sizes.clear();
@@ -1065,6 +1126,8 @@ impl Desk {
     fn request_render(&mut self) {
         self.last_camera_change = None;
         self.generation += 1;
+        #[cfg(feature = "experimental-nef-progressive")]
+        self.services.nef_preview.request(self.nef_preview_job());
         let content = self.current_render_content();
         if content != self.render_content {
             self.render_valid_from = self.generation;
@@ -1143,6 +1206,8 @@ impl Desk {
             self.retire_views();
             self.services.renders.put(RenderJob::Clear);
         }
+        #[cfg(feature = "experimental-nef-progressive")]
+        self.services.nef_preview.request(self.nef_preview_job());
         self.schedule_decodes();
         if self.streaming_eligible() {
             for id in self.selected.iter().flatten() {
@@ -1320,6 +1385,40 @@ impl Desk {
                             .is_some_and(|e| e.eq_ignore_ascii_case("dng"))
                     })
             })
+    }
+    #[cfg(feature = "experimental-nef-progressive")]
+    fn nef_preview_job(&self) -> Option<crate::streaming::Request> {
+        if self.settings.highpass || self.settings.mode == Mode::Diff {
+            return None;
+        }
+        let aid = self.selected[0]?;
+        let bid = self.selected[1].unwrap_or(aid);
+        if [aid, bid].iter().all(|id| self.frames.contains_key(id))
+            || [aid, bid]
+                .iter()
+                .any(|id| self.decode_errors.contains_key(id))
+        {
+            return None;
+        }
+        let a = self.photos.get(*self.indices.get(&aid)?)?;
+        let b = self.photos.get(*self.indices.get(&bid)?)?;
+        if ![a, b].iter().any(|photo| {
+            photo
+                .path
+                .extension()
+                .is_some_and(|extension| extension.eq_ignore_ascii_case("nef"))
+        }) {
+            return None;
+        }
+        Some(crate::streaming::Request {
+            generation: self.generation,
+            pair: [(aid, a.path.clone()), (bid, b.path.clone())],
+            settings: self.settings.clone(),
+            ready: [
+                self.frames.get(&aid).cloned(),
+                self.frames.get(&bid).cloned(),
+            ],
+        })
     }
     fn local_point(&self, p: Point<Pixels>) -> [f32; 2] {
         let origin = self.viewport_bounds.get().origin;
@@ -1817,6 +1916,7 @@ impl Desk {
         let (a_size, b_size) = (source_size(0), source_size(1));
         let size_controls = div()
             .flex()
+            .flex_wrap()
             .items_center()
             .gap_1()
             .children([512, 1536].map(|edge| {
@@ -1848,7 +1948,7 @@ impl Desk {
             .absolute()
             .top(px(112.))
             .right_3()
-            .w(px(346.))
+            .w(px(STATISTICS_WIDTH))
             .max_h(px((f32::from(self.viewport_bounds.get().size.height)
                 - 310.)
                 .max(160.)))
@@ -1949,8 +2049,8 @@ impl Desk {
                         .gap_1()
                         .text_xs()
                         .child(div().flex_1().text_color(rgb(TEXT)).child(label.to_owned()))
-                        .child(div().w(px(78.)).child(a))
-                        .child(div().w(px(78.)).child(b))
+                        .child(div().w(px(68.)).flex_none().child(a))
+                        .child(div().w(px(68.)).flex_none().child(b))
                 };
                 panel = panel
                     .child(section_label("NOISE ESTIMATES · σY′"))
@@ -2158,29 +2258,13 @@ impl Desk {
             self.settings.viewport[1] as f32 / self.display_scale,
         ];
         let point = point.map(|v| v / self.display_scale);
-        let [x, y] = color::popup_position(point, view, [424., 408.]);
-        let swatch = |label: String, sample: color::Sample| {
-            let [r, g, b] = color::rgb8(sample.rgb);
-            div()
-                .flex()
-                .items_center()
-                .gap_2()
-                .child(
-                    div()
-                        .w(px(36.))
-                        .h(px(22.))
-                        .border_1()
-                        .border_color(rgb(0xaaaaaa))
-                        .bg(rgb((r as u32) << 16 | (g as u32) << 8 | b as u32)),
-                )
-                .child(div().text_xs().child(label))
-        };
+        let [x, y] = color::popup_position(point, view, PICKER_SIZE);
         glass()
             .absolute()
             .left(px(x))
             .top(px(y))
-            .w(px(424.))
-            .h(px(408.))
+            .w(px(PICKER_SIZE[0]))
+            .h(px(PICKER_SIZE[1]))
             .overflow_hidden()
             .p_3()
             .flex()
@@ -2203,19 +2287,13 @@ impl Desk {
                             .min_w_0()
                             .flex()
                             .flex_col()
-                            .gap_3()
-                            .child(swatch(format!("A · {}, {}", a.x, a.y), a))
-                            .when(has_b, |el| {
-                                el.child(swatch(format!("B · {}, {}", b.x, b.y), b))
-                            })
-                            .when(!has_b, |el| {
-                                el.child(
-                                    div()
-                                        .text_xs()
-                                        .text_color(rgb(MUTED))
-                                        .child("B — not selected"),
-                                )
-                            })
+                            .gap_1()
+                            .child(div().flex().text_xs()
+                                .child(div().flex_1().child(format!("A · {}, {}", a.x, a.y)))
+                                .when(has_b, |el| el.child(div().flex_1().child(format!("B · {}, {}", b.x, b.y)))))
+                            .child(comparison_swatch(a.rgb, has_b.then_some(b.rgb))
+                                .w_full().h(px(PICKER_SWATCH_HEIGHT)).flex_none())
+                            .when(!has_b, |el| el.child(div().text_xs().text_color(rgb(MUTED)).child("B — not selected")))
                             .child(
                                 div()
                                     .text_xs()
@@ -2840,6 +2918,25 @@ fn pixel_loupe(loupe: Arc<color::Loupe>, display_scale: f32) -> Canvas<()> {
         },
     )
 }
+fn comparison_swatch(a: [u16; 3], b: Option<[u16; 3]>) -> Canvas<()> {
+    let packed = |sample| {
+        let [r, g, b] = color::rgb8(sample);
+        (r as u32) << 16 | (g as u32) << 8 | b as u32
+    };
+    let a = packed(a);
+    let b = b.map(packed);
+    canvas(
+        |_, _, _| (),
+        move |bounds, _, window, _| {
+            // One continuous field: A fills it, B covers the right half. No gap,
+            // per-swatch outline or rounded inner edge can hide the color boundary.
+            window.paint_quad(fill(bounds, rgb(a)));
+            if let Some(b) = b {
+                window.paint_quad(fill(right_clip(bounds, 0.5), rgb(b)));
+            }
+        },
+    )
+}
 fn statistics_size_choice(a: Option<[u32; 2]>, b: Option<[u32; 2]>, edge: u32) -> (String, bool) {
     match (a, b) {
         (Some(a), Some(b)) if a == b && !a.contains(&0) => {
@@ -3006,6 +3103,26 @@ mod tests {
         assert_eq!(right_clip(bounds, 1.).size.width, px(0.));
     }
     #[test]
+    fn joined_picker_swatch_uses_a_shared_boundary_at_fractional_dpi() {
+        for dpi in [1., 1.25, 1.5, 2.] {
+            let bounds = Bounds {
+                origin: point(px(11. / dpi), px(17. / dpi)),
+                size: size(px(219. / dpi), px(super::PICKER_SWATCH_HEIGHT)),
+            };
+            // A is the whole background, not a separately inset rectangle. B
+            // covers its right half without creating an unpainted inner border.
+            let b = right_clip(bounds, 0.5);
+            assert_eq!(b.origin.x, bounds.origin.x + bounds.size.width * 0.5);
+            assert!(
+                f32::from(b.origin.x + b.size.width - bounds.origin.x - bounds.size.width).abs()
+                    < 0.0001
+            );
+            assert_eq!(b.origin.y, bounds.origin.y);
+            assert_eq!(b.size.height, bounds.size.height);
+        }
+        assert!(super::PICKER_SWATCH_HEIGHT > 2. * 22.);
+    }
+    #[test]
     fn texture_motion_uses_physical_snapshot_pixels_at_high_dpi() {
         let viewport = Bounds {
             origin: point(px(100.), px(50.)),
@@ -3091,7 +3208,7 @@ mod tests {
             let mut settings = Settings::default();
             settings.viewport = [1000, 750].map(|n| (n as f32 * dpi) as u32);
             settings.camera.zoom = Zoom::Fixed(4. * dpi);
-            settings.camera.center = [0.2, 0.5];
+            settings.camera.center = [0.02, 0.5];
             settings.camera.clamp(frame.size(), settings.viewport);
             let point = [750. * dpi, 300. * dpi];
             let before = color::sample_pair(&frame, &frame, &settings, point).unwrap()[0];
@@ -3100,7 +3217,7 @@ mod tests {
                 .camera
                 .zoom_at(0.5, point, frame.size(), settings.viewport);
             let after = color::sample_pair(&frame, &frame, &settings, point).unwrap()[0];
-            assert_eq!(after.x, 375);
+            assert_eq!(after.x, 125);
             assert_eq!(after.y, 221);
             assert_eq!(
                 after.y, before.y,
@@ -3108,7 +3225,7 @@ mod tests {
             );
             assert_ne!(
                 after.x, before.x,
-                "Clamping changed the source under the cursor"
+                "The image-centre limit changed the source under the cursor"
             );
             // Camera-only requests can retain the loupe while its worker
             // replacement is pending; another source or Diff content cannot.

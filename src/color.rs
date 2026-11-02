@@ -475,4 +475,32 @@ mod tests {
         assert_eq!(p[0].rgb, [12345; 3]);
         assert!(sample_pair(&a, &b, &s, [0., 0.]).is_none());
     }
+    #[test]
+    fn picker_tracks_panned_reduced_images_and_ignores_exposed_background() {
+        let a = Frame {
+            width: 64,
+            height: 48,
+            rgb: vec![12345; 64 * 48 * 3],
+        };
+        let b = Frame {
+            width: 32,
+            height: 24,
+            rgb: vec![54321; 32 * 24 * 3],
+        };
+        let mut settings = Settings {
+            viewport: [400, 300],
+            ..Default::default()
+        };
+        settings.camera.zoom = crate::model::Zoom::Fixed(3.125);
+        settings
+            .camera
+            .pan([50., -37.5], a.size(), settings.viewport);
+        assert_eq!(settings.camera.center, [0.25, 0.75]);
+        let pair = sample_pair(&a, &b, &settings, [200., 150.]).unwrap();
+        assert_eq!([pair[0].x, pair[0].y], [16, 36]);
+        assert_eq!([pair[1].x, pair[1].y], [8, 18]);
+        assert_eq!(pair[0].rgb, [12345; 3]);
+        assert_eq!(pair[1].rgb, [54321; 3]);
+        assert!(sample_pair(&a, &b, &settings, [399., 0.]).is_none());
+    }
 }

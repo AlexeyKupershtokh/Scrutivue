@@ -145,7 +145,9 @@ extern "C" unsigned diff_raw_matching_tile_policy(const void *original, size_t o
 
 static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail, bool region, bool parallel,
                              RawView *out, char *error, size_t capacity,
-                             CancelFn callback, void *context) {
+                             CancelFn callback, void *context,
+                             ParallelRaw::Preview preview = nullptr, void *preview_context = nullptr,
+                             float center_x = 0.5f, float center_y = 0.5f) {
     RawResult *result = nullptr;
     try {
         result = new RawResult();
@@ -177,6 +179,7 @@ static int raw_open_cancellable(const void *bytes, size_t length, int thumbnail,
         } else {
             configure_development(result->decoder, region);
             if (parallel) result->decoder.enable_parallel(bytes, length, callback, context);
+            if (preview) result->decoder.set_preview(preview, preview_context, center_x, center_y);
             start = Clock::now();
             status = result->decoder.unpack();
             unpack_ns = elapsed();
@@ -222,6 +225,13 @@ extern "C" int diff_raw_open_legacy_cancellable(const void *bytes, size_t length
                              RawView *out, char *error, size_t capacity,
                              CancelFn callback, void *context) {
     return raw_open_cancellable(bytes, length, thumbnail, false, false, out, error, capacity, callback, context);
+}
+extern "C" int diff_raw_open_preview_cancellable(const void *bytes, size_t length,
+                             RawView *out, char *error, size_t capacity,
+                             CancelFn callback, void *context, ParallelRaw::Preview preview,
+                             void *preview_context, float center_x, float center_y) {
+    return raw_open_cancellable(bytes, length, 0, false, true, out, error, capacity,
+        callback, context, preview, preview_context, center_x, center_y);
 }
 extern "C" int diff_raw_open(const void *bytes, size_t length, int thumbnail,
                              RawView *out, char *error, size_t capacity) {

@@ -312,7 +312,7 @@ mod tests {
                 image,
                 viewport,
             );
-            assert_eq!(camera.center, [0.5, 0.5]);
+            assert_eq!(camera.center, [1., 0.]);
             assert_eq!(
                 camera.scale(image, viewport),
                 Camera::zoom_limits(image, viewport)[0]
@@ -322,6 +322,25 @@ mod tests {
             assert!((center[0] - 0.55).abs() < 1e-6);
             assert!((center[1] - 0.525).abs() < 1e-6);
         }
+    }
+    #[test]
+    fn panned_fit_view_is_clipped_to_the_image_in_the_navigator() {
+        let image = [8000, 6000];
+        let viewport = [1000, 750];
+        let mut camera = Camera::default();
+        camera.pan([-300., 225.], image, viewport);
+        assert!((camera.center[0] - 0.8).abs() < 1e-6);
+        assert!((camera.center[1] - 0.2).abs() < 1e-6);
+        assert_eq!(camera.zoom, Zoom::Fit);
+        let visible = visible_rect(&camera, image, viewport);
+        for i in 0..2 {
+            assert!(visible.origin[i] >= 0.);
+            assert!(visible.origin[i] + visible.size[i] <= 1.);
+        }
+        assert!((visible.origin[0] - 0.3).abs() < 1e-6);
+        assert!((visible.size[0] - 0.7).abs() < 1e-6);
+        assert!((visible.size[1] - 0.7).abs() < 1e-6);
+        assert!(visible.contains(camera.center));
     }
     #[test]
     fn preview_is_small_bgra_and_can_be_cancelled() {

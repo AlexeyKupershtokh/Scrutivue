@@ -19,6 +19,7 @@
 #include <atomic>
 #include <cerrno>
 #include <cstdlib>
+#include <cmath>
 #include <cstring>
 #include <exception>
 #include <limits>
@@ -293,7 +294,7 @@ void ParallelRaw::scale_colors_loop(float multipliers[4]) {
 void ParallelRaw::lin_interpolate_loop(int *code, int size) {
     if (!enabled_) return LibRaw::lin_interpolate_loop(code, size);
     const auto &s = imgdata.sizes;
-    parallel_for(s.height - 2, [&](uint32_t index) {
+    auto interpolate = [&](uint32_t index) {
         check_cancelled();
         const int row = index + 1;
         for (int col = 1; col < s.width - 1; ++col) {
@@ -307,7 +308,92 @@ void ParallelRaw::lin_interpolate_loop(int *code, int size) {
             for (int i = imgdata.idata.colors; --i; instruction += 2)
                 pixel[instruction[0]] = sums[instruction[0]] * instruction[1] >> 8;
         }
+    };
+    if (!preview_supported()) {
+        parallel_for(s.height - 2, interpolate);
+        return;
+    }
+    // The entire CFA, black/white normalization, WB/scaling and border pass are
+    // already complete. Bilinear interiors read only native CFA channels, so
+    // disjoint bands may finish in display-priority order without seam changes.
+    // Keep previews separate from the mutable final RGB owner and its gamma LUT.
+    std::array<uint16_t, 65536> saved, curve;
+    std::copy_n(imgdata.color.curve, saved.size(), saved.data());
+    gamma_curve(imgdata.params.gamm[0], imgdata.params.gamm[1], 2, int(65536 / imgdata.params.bright));
+    std::copy_n(imgdata.color.curve, curve.size(), curve.data());
+    std::copy(saved.begin(), saved.end(), imgdata.color.curve);
+    constexpr unsigned rows = 256;
+    const unsigned bands = (s.height + rows - 1) / rows;
+    float cx = preview_center_[0], cy = preview_center_[1];
+    if (s.flip & 4) std::swap(cx, cy);
+    if (s.flip & 2) cy = 1.f - cy;
+    const float priority = cy * s.height;
+    std::vector<unsigned> order(bands);
+    for (unsigned i = 0; i < bands; ++i) order[i] = i;
+    std::stable_sort(order.begin(), order.end(), [&](unsigned a, unsigned b) {
+        return std::abs((a + 0.5f) * rows - priority) < std::abs((b + 0.5f) * rows - priority);
     });
+    for (unsigned band : order) {
+        const unsigned first = (std::max)(1u, band * rows);
+        const unsigned end = (std::min)(unsigned(s.height) - 1, (band + 1) * rows);
+        if (first < end) parallel_for(end - first, [&](uint32_t row) { interpolate(first + row - 1); });
+        check_cancelled();
+        emit_preview(band * rows, (std::min)(unsigned(s.height), (band + 1) * rows), curve.data());
+    }
+}
+
+void ParallelRaw::set_preview(Preview callback, void *context, float center_x, float center_y) {
+    preview_ = callback;
+    preview_context_ = context;
+    preview_center_[0] = std::isfinite(center_x) ? (std::max)(0.f, (std::min)(1.f, center_x)) : 0.5f;
+    preview_center_[1] = std::isfinite(center_y) ? (std::max)(0.f, (std::min)(1.f, center_y)) : 0.5f;
+}
+
+bool ParallelRaw::preview_supported() const {
+    const auto &d = imgdata;
+    const auto &p = d.params;
+    const auto &io = libraw_internal_data.internal_output_params;
+    return enabled_ && preview_ && d.idata.colors == 3 && d.idata.filters > 1000 &&
+        p.output_color == 1 && p.output_bps == 16 && p.no_auto_bright &&
+        std::isfinite(p.bright) && p.bright > 0 && !p.half_size && !p.four_color_rgb &&
+        !p.med_passes && !p.highlight && !p.exp_correc && !p.camera_profile &&
+        !io.mix_green && !io.fuji_width && d.sizes.pixel_aspect == 1.f &&
+        d.sizes.flip >= 0 && d.sizes.flip <= 7 && !callbacks.post_interpolate_cb &&
+        !callbacks.pre_converttorgb_cb && !callbacks.post_converttorgb_cb;
+}
+
+void ParallelRaw::emit_preview(unsigned first, unsigned end, const uint16_t *curve) {
+    const auto &s = imgdata.sizes;
+    constexpr unsigned ratio = 4;
+    unsigned left = 0, top = first, width = s.width, height = end - first;
+    if (s.flip & 2) top = s.height - end;
+    if (s.flip & 4) { std::swap(left, top); std::swap(width, height); }
+    const unsigned x0 = (left + ratio - 1) / ratio, y0 = (top + ratio - 1) / ratio;
+    const unsigned x1 = (left + width + ratio - 1) / ratio, y1 = (top + height + ratio - 1) / ratio;
+    if (x0 == x1 || y0 == y1) return;
+    std::vector<uint16_t> pixels(size_t(x1 - x0) * (y1 - y0) * 3);
+    const bool raw_color = libraw_internal_data.internal_output_params.raw_color != 0;
+    parallel_for(y1 - y0, [&](uint32_t row) {
+        check_cancelled();
+        for (unsigned col = x0; col < x1; ++col) {
+            unsigned x = col * ratio, y = (row + y0) * ratio;
+            if (s.flip & 4) std::swap(x, y);
+            if (s.flip & 2) y = s.height - 1 - y;
+            if (s.flip & 1) x = s.width - 1 - x;
+            const auto *pixel = imgdata.image[size_t(y) * s.width + x];
+            auto *to = pixels.data() + (size_t(row) * (x1 - x0) + col - x0) * 3;
+            for (unsigned c = 0; c < 3; ++c) {
+                // output_color=1 uses LibRaw's identity sRGB output matrix.
+                const float value = imgdata.color.rgb_cam[c][0] * pixel[0] +
+                    imgdata.color.rgb_cam[c][1] * pixel[1] + imgdata.color.rgb_cam[c][2] * pixel[2];
+                to[c] = curve[raw_color ? pixel[c] : clipped(int(value))];
+            }
+        }
+    });
+    check_cancelled();
+    const unsigned iw = s.flip & 4 ? s.height : s.width;
+    const unsigned ih = s.flip & 4 ? s.width : s.height;
+    preview_(preview_context_, pixels.data(), iw, ih, x0, y0, x1 - x0, y1 - y0, ratio);
 }
 
 void ParallelRaw::convert_to_rgb_loop(float matrix[3][4]) {
@@ -474,6 +560,32 @@ void ParallelRaw::test_kernels() {
                 auto b = parallel->dcraw_make_mem_image(&berr);
                 const bool equal = a && b && !aerr && !berr && a->width == b->width && a->height == b->height &&
                     a->data_size == b->data_size && !std::memcmp(a->data, b->data, a->data_size);
+                if (equal) {
+                    struct PreviewCheck {
+                        const libraw_processed_image_t *image;
+                        std::vector<unsigned> visits;
+                        bool valid = true;
+                    } check{a, std::vector<unsigned>(size_t((a->width + 3) / 4) * ((a->height + 3) / 4), 0)};
+                    parallel_internal->internal_output_params.raw_color = 1;
+                    parallel->set_preview([](void *context, const uint16_t *pixels, uint32_t iw, uint32_t ih,
+                        uint32_t x, uint32_t y, uint32_t w, uint32_t h, uint32_t ratio) {
+                        auto &check = *static_cast<PreviewCheck *>(context);
+                        check.valid &= iw == check.image->width && ih == check.image->height && ratio == 4;
+                        for (unsigned row = 0; row < h; ++row)
+                            for (unsigned col = 0; col < w; ++col) {
+                                ++check.visits[size_t(y + row) * ((iw + 3) / 4) + x + col];
+                                const auto *expected = reinterpret_cast<const uint16_t *>(check.image->data) +
+                                    (size_t((y + row) * ratio) * iw + (x + col) * ratio) * 3;
+                                const auto *actual = pixels + (size_t(row) * w + col) * 3;
+                                check.valid &= !std::memcmp(expected, actual, 6);
+                            }
+                    }, &check, 0.5f, 0.5f);
+                    for (unsigned row = 0; row < height; row += 3)
+                        parallel->emit_preview(row, (std::min)(height, row + 3), serial->imgdata.color.curve);
+                    parallel->set_preview(nullptr, nullptr, 0.5f, 0.5f);
+                    require(check.valid && std::all_of(check.visits.begin(), check.visits.end(),
+                        [](unsigned visits) { return visits == 1; }), "NEF preview orientation/sample coverage mismatch");
+                }
                 LibRaw::dcraw_clear_mem(a); LibRaw::dcraw_clear_mem(b);
                 require(equal, "Parallel gamma/orientation mismatch");
             }

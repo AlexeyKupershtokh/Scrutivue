@@ -102,6 +102,56 @@ mod tests {
             }
         }
     }
+
+    #[test]
+    #[ignore = "requires a working native GPU backend"]
+    fn gpu_matches_cpu_for_panned_fit_and_reduced_views_at_image_edges() {
+        use crate::model::Zoom;
+        let make = |w, h, seed: u32| Frame {
+            width: w,
+            height: h,
+            rgb: (0..w * h * 3)
+                .map(|i| i.wrapping_mul(747796405).wrapping_add(seed) as u16)
+                .collect(),
+        };
+        let a = make(65, 49, 13);
+        let b = make(47, 37, 97);
+        let mut gpu = Gpu::new().unwrap();
+        let mut cpu = Cpu::new();
+        for zoom in [
+            Zoom::Fit,
+            Zoom::Fixed(0.14),
+            Zoom::Fixed(1.),
+            Zoom::Fixed(8.),
+        ] {
+            for center in [[0., 1.], [1., 0.], [0.25, 0.7]] {
+                for highpass in [false, true] {
+                    for mode in Mode::ALL {
+                        let mut s = Settings {
+                            viewport: [37, 29],
+                            mode,
+                            highpass,
+                            ..Default::default()
+                        };
+                        s.camera.zoom = zoom;
+                        s.camera.center = center;
+                        s.camera.clamp(a.size(), s.viewport);
+                        for show_b in [false, true] {
+                            let expected = cpu.render((1, &a), (2, &b), &s, show_b);
+                            let actual = gpu.render((1, &a), (2, &b), &s, show_b).unwrap();
+                            let delta = expected
+                                .iter()
+                                .zip(actual)
+                                .map(|(a, b)| a.abs_diff(b))
+                                .max()
+                                .unwrap();
+                            assert!(delta <= 1, "{zoom:?}, {center:?}, {mode:?}, hp={highpass}, B={show_b}, delta={delta}");
+                        }
+                    }
+                }
+            }
+        }
+    }
 }
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]

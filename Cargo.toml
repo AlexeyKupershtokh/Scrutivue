@@ -1,6 +1,6 @@
 [package]
 name = "scrutivue"
-version = "0.3.1"
+version = "0.3.2"
 edition = "2021"
 description = "Scrutivue — a GPU-assisted photograph and RAW comparison viewer"
 license = "MIT"
@@ -9,9 +9,10 @@ build = "build.rs"
 default-run = "scrutivue"
 
 [features]
-default = ["experimental-single-parallel"]
+default = ["experimental-nef-progressive"]
 experimental-jxl-parallel = []
 experimental-single-parallel = ["experimental-jxl-parallel"]
+experimental-nef-progressive = ["experimental-single-parallel"]
 
 [[bin]]
 name = "scrutivue-jxl-parallel"
@@ -24,6 +25,13 @@ bench = false
 name = "scrutivue-single-parallel"
 path = "src/bin/scrutivue-single-parallel.rs"
 required-features = ["experimental-single-parallel"]
+test = false
+bench = false
+
+[[bin]]
+name = "scrutivue-nef-progressive"
+path = "src/bin/scrutivue-nef-progressive.rs"
+required-features = ["experimental-nef-progressive"]
 test = false
 bench = false
 
