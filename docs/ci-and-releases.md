@@ -1,6 +1,31 @@
 # Windows CI cost and portable releases
 
-## Last observed Actions run
+## Stable compiler cache identity, 2026-11-02
+
+The 0.3.3 runs confirmed both a Cargo-cache miss (**20:02** job) and a hit
+(**12:08** job). The miss used Visual Studio installer `18.11.12328.437` while
+the existing cache used `18.11.12315.225`, despite the same Rust compiler. The
+warm run compiled only `scrutivue`, not its dependencies; two final application/
+test builds still accounted for nearly ten minutes. This change does not remove
+that compilation/linking cost or change production optimization settings.
+
+`scripts/ci_toolchain.ps1` now initializes an x64 Visual C++ developer environment
+and fingerprints the actual **rustc identity, target, MSVC toolset, cl.exe file
+version and Windows SDK version**. Cargo/cc receive that same environment through
+`GITHUB_ENV`. Installation paths and Visual Studio installer patch versions do
+not participate; real compiler/toolset/SDK changes still invalidate the cache.
+The measured versions and paths are logged and saved under `target/ci-toolchain.json`.
+
+The Cargo cache uses a new `windows-release-v2` namespace, with no fallback to the
+old installer-based identities. Its first run therefore populates a new cache;
+subsequent installer-only updates can reuse it. The separate pinned-native-source
+cache, read-only permissions, manual trigger, build budget and release/test
+commands are unchanged. `scripts/test_ci_toolchain.ps1` checks installer/path
+stability, newline normalization, compiler/SDK invalidation and missing-field
+rejection. The helper and its developer environment were also exercised locally;
+a hosted hit with the new scheme is not claimed until a future manual run.
+
+## Historical baseline, 2026-11-01
 
 Reviewed on 2026-11-01. The last public run was
 [Windows #1, 41228737944](https://github.com/AlexeyKupershtokh/Scrutivue/actions/runs/41228737944),

@@ -32,15 +32,8 @@ jobs:
       - name: Identify compiler cache compatibility
         id: toolchain
         run: |
-          $rust = rustc --version --verbose | Out-String
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $vswhere = Join-Path ${env:ProgramFiles(x86)} 'Microsoft Visual Studio\Installer\vswhere.exe'
-          $msvc = & $vswhere -latest -products '*' -property installationVersion | Out-String
-          if ($LASTEXITCODE -ne 0) { exit $LASTEXITCODE }
-          $description = "$rust`n$msvc"
-          Write-Host $description
-          $identity = [Convert]::ToHexString([Security.Cryptography.SHA256]::HashData([Text.Encoding]::UTF8.GetBytes($description))).ToLowerInvariant()
-          "identity=$identity" >> $env:GITHUB_OUTPUT
+          ./scripts/test_ci_toolchain.ps1
+          ./scripts/ci_toolchain.ps1
       - name: Restore pinned native sources and runtime
         id: native-cache
         uses: actions/cache/restore@caa296126883cff596d87d8935842f9db880ef25 # v5
@@ -72,10 +65,10 @@ jobs:
             ~/.cargo/registry
             ~/.cargo/git
             target/release
-          key: windows-release-v1-${{ runner.arch }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'native/**', 'config/*.json', '.github/workflows/windows.yml') }}-${{ github.sha }}
+          key: windows-release-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'native/**', 'config/*.json', '.github/workflows/windows.yml', 'scripts/ci_toolchain.ps1') }}-${{ github.sha }}
           restore-keys: |
-            windows-release-v1-${{ runner.arch }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'native/**', 'config/*.json', '.github/workflows/windows.yml') }}-
-            windows-release-v1-${{ runner.arch }}-${{ steps.toolchain.outputs.identity }}-
+            windows-release-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.identity }}-${{ hashFiles('Cargo.lock', 'Cargo.toml', 'build.rs', 'native/**', 'config/*.json', '.github/workflows/windows.yml', 'scripts/ci_toolchain.ps1') }}-
+            windows-release-v2-${{ runner.arch }}-${{ steps.toolchain.outputs.identity }}-
       # Install after restoring target/release so an older cache cannot replace it.
       - name: Install pinned JPEG XL runtime and notices
         run: python scripts/prepare_jxl_runtime.py --profile release
